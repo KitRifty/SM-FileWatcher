@@ -30,63 +30,108 @@
 #ifndef _INCLUDE_FILESYSTEMWATCHER_H_
 #define _INCLUDE_FILESYSTEMWATCHER_H_
 
-#include <IPluginSys.h>
 #include <am-platform.h>
 #include <string>
 #include <vector>
+#include <queue>
 #include <memory>
+#include <thread>
+#include <mutex>
 
 #ifdef KE_WINDOWS
 #include <Windows.h>
 #include <windef.h>
 #endif
 
+#include <IPluginSys.h>
+#include <sp_vm_api.h>
+
 class FileSystemWatcher
 {
-private:
-	struct PathInfo
+public:
+	enum NotifyFilters
 	{
-		std::string m_path;
-		bool m_watchSubTree;
-
-		PathInfo(const char* path, bool watchSubTree)
-		{
-			m_path = path;
-			m_watchSubTree = watchSubTree;
-		}
+		None = 0,
+		FileName = (1 << 0),         // The name of the file.
+		DirectoryName = (1 << 1),    // The name of the directory.
+		Attributes = (1 << 2),       // The attributes of the file or folder.
+		Size = (1 << 3),             // The size of the file or folder.
+		LastWrite = (1 << 4),        // The date the file or folder last had anything written on it.
+		LastAccess = (1 << 5),       // The date the file or folder was last opened.
+		CreationTime = (1 << 6),     // The time the file or folder was created.
+		Security = (1 << 8)          // The security settings of the file or folder.
 	};
 
-	std::vector<std::unique_ptr<PathInfo>> m_paths;
+private:
+	bool m_watching;
+	std::string m_path;
 
+public:
+	bool m_includeSubdirectories;
+	NotifyFilters m_notifyFilter;
+
+private:
 #ifdef KE_WINDOWS
-	std::vector<HANDLE> m_changeHandles;
+	HANDLE m_threadCancelEventHandle;
+	std::thread m_thread;
+	bool m_threadRunning;
 #endif
+	std::mutex m_mutex;
+	std::queue<int> m_changeEvents;
 
-	FileSystemWatcher();
+	std::vector<SourcePawn::IPluginFunction*> m_pluginCallbacks;
+
+	FileSystemWatcher(const char* path = "", const char* filter = "");
 
 public:
 	~FileSystemWatcher();
 
-	bool AddPath(const char* path, bool watchSubTree);
+	void AddPluginCallback(SourcePawn::IPluginFunction* cb);
+	void RemovePluginCallback(SourcePawn::IPluginFunction* cb);
+
+	bool IsWatching() const { return m_watching; }
+	bool Start();
+	void Stop();
+
+private:
+	void OnGameFrame(bool simulating);
+	void OnPluginUnloaded(SourceMod::IPlugin* plugin);
+
+#ifdef KE_WINDOWS
+	void ThreadProc(HANDLE changeHandle);
+#endif
+#ifdef KE_LINUX
+	void ThreadProc();
+#endif
 
 	friend class FileSystemWatcherManager;
 };
 
-class FileSystemWatcherManager : public SourceMod::IHandleTypeDispatch
+class FileSystemWatcherManager : 
+	public SourceMod::IHandleTypeDispatch,
+	public SourceMod::IPluginsListener
 {
 private:
 	SourceMod::HandleType_t m_HandleType;
+	static sp_nativeinfo_t m_Natives[];
+
+	std::vector<FileSystemWatcher*> m_watchers;
 
 public:
 	FileSystemWatcherManager();
 
 	bool SDK_OnLoad(char* error, int errorSize);
 	void SDK_OnUnload();
+	void OnGameFrame(bool simulating);
 
-	SourceMod::Handle_t CreateWatcher(SourceMod::IPlugin* plugin);
+	SourceMod::Handle_t CreateWatcher(SourcePawn::IPluginContext* context, const char* path, const char* filter);
+	FileSystemWatcher* GetWatcher(SourceMod::Handle_t handle);
 
 	// IHandleTypeDispatch
 	virtual void OnHandleDestroy(SourceMod::HandleType_t type, void *object) override;
+
+	// IPluginsListener
+	virtual void OnPluginUnloaded(SourceMod::IPlugin* plugin) override;
 };
 
 extern FileSystemWatcherManager g_FileSystemWatchers;

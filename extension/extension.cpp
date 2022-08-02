@@ -41,6 +41,8 @@ bool FileWatcherExtension::SDK_OnLoad(char *error, size_t maxlen, bool late)
 		return false;
 	}
 
+	sharesys->RegisterLibrary(myself, "filewatcher");
+
 	return true;
 }
 
