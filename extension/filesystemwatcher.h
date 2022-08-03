@@ -41,6 +41,8 @@
 #ifdef KE_WINDOWS
 #include <Windows.h>
 #include <windef.h>
+#elif defined KE_LINUX
+#include <sys/inotify.h>
 #endif
 
 #include <IPluginSys.h>
@@ -74,7 +76,9 @@ private:
 #ifdef KE_WINDOWS
 	HANDLE m_threadCancelEventHandle;
 #elif defined KE_LINUX
-
+	int m_inotify_fd;
+	int m_inotify_wd;
+	bool m_threadCancelEventHandle;
 #endif
 
 	std::thread m_thread;
