@@ -213,8 +213,7 @@ void FileSystemWatcher::OnPluginUnloaded(SourceMod::IPlugin* plugin)
 
 #ifdef KE_WINDOWS
 void FileSystemWatcher::ThreadProc(HANDLE changeHandle)
-#endif
-#ifdef KE_LINUX
+#elif defined KE_LINUX
 void FileSystemWatcher::ThreadProc()
 #endif
 {

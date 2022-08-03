@@ -75,7 +75,10 @@ private:
 	HANDLE m_threadCancelEventHandle;
 	std::thread m_thread;
 	bool m_threadRunning;
+#elif defined KE_LINUX
+
 #endif
+
 	std::mutex m_mutex;
 	std::queue<int> m_changeEvents;
 
@@ -99,8 +102,7 @@ private:
 
 #ifdef KE_WINDOWS
 	void ThreadProc(HANDLE changeHandle);
-#endif
-#ifdef KE_LINUX
+#elif defined KE_LINUX
 	void ThreadProc();
 #endif
 
