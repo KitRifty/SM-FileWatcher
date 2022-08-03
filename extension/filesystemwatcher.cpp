@@ -29,6 +29,8 @@
 
 #include "filesystemwatcher.h"
 #include "smsdk_ext.h"
+#include <locale>
+#include <codecvt>
 #include <am-string.h>
 #include <os/am-fsutil.h>
 
@@ -43,6 +45,7 @@ FileSystemWatcher::FileSystemWatcher(const char* path, const char* filter) :
 	m_path(path),
 	m_includeSubdirectories(false),
 	m_notifyFilter(None),
+	m_onChanged(nullptr),
 #ifdef KE_WINDOWS
 	m_threadCancelEventHandle(nullptr),
 #elif defined KE_LINUX
@@ -70,23 +73,6 @@ FileSystemWatcher::~FileSystemWatcher()
 #endif
 }
 
-void FileSystemWatcher::AddPluginCallback(SourcePawn::IPluginFunction* cb)
-{
-	m_pluginCallbacks.push_back(cb);
-}
-
-void FileSystemWatcher::RemovePluginCallback(SourcePawn::IPluginFunction* cb)
-{
-	for (auto it = m_pluginCallbacks.begin(); it != m_pluginCallbacks.end(); it++)
-	{
-		if (*it == cb)
-		{
-			m_pluginCallbacks.erase(it);
-			break;
-		}
-	}
-}
-
 bool FileSystemWatcher::Start()
 {
 	if (IsWatching())
@@ -94,68 +80,77 @@ bool FileSystemWatcher::Start()
 		return true;
 	}
 
-	if (!ke::file::PathExists(m_path.c_str()))
+	if (!ke::file::IsDirectory(m_path.c_str()))
 	{
 		return false;
 	}
 
+	std::unique_ptr<ThreadData> data = std::make_unique<ThreadData>();
+
 #ifdef KE_WINDOWS
-	DWORD notifyFilter = 0; 
+	data->watchSubTree = m_includeSubdirectories;
+	data->notifyFilter = 0;
+
 	if (m_notifyFilter & FileName)
 	{
-		notifyFilter |= FILE_NOTIFY_CHANGE_FILE_NAME;
+		data->notifyFilter |= FILE_NOTIFY_CHANGE_FILE_NAME;
 	}
 
 	if (m_notifyFilter & DirectoryName)
 	{
-		notifyFilter |= FILE_NOTIFY_CHANGE_DIR_NAME;
+		data->notifyFilter |= FILE_NOTIFY_CHANGE_DIR_NAME;
 	}
 	
 	if (m_notifyFilter & Attributes)
 	{
-		notifyFilter |= FILE_NOTIFY_CHANGE_ATTRIBUTES;
+		data->notifyFilter |= FILE_NOTIFY_CHANGE_ATTRIBUTES;
 	}
 
 	if (m_notifyFilter & Size)
 	{
-		notifyFilter |= FILE_NOTIFY_CHANGE_SIZE;
+		data->notifyFilter |= FILE_NOTIFY_CHANGE_SIZE;
 	}
 
 	if (m_notifyFilter & LastWrite)
 	{
-		notifyFilter |= FILE_NOTIFY_CHANGE_LAST_WRITE;
+		data->notifyFilter |= FILE_NOTIFY_CHANGE_LAST_WRITE;
 	}
 
 	if (m_notifyFilter & LastAccess)
 	{
-		notifyFilter |= FILE_NOTIFY_CHANGE_LAST_ACCESS;
+		data->notifyFilter |= FILE_NOTIFY_CHANGE_LAST_ACCESS;
 	}
 
 	if (m_notifyFilter & CreationTime)
 	{
-		notifyFilter |= FILE_NOTIFY_CHANGE_CREATION;
+		data->notifyFilter |= FILE_NOTIFY_CHANGE_CREATION;
 	}
 	
 	if (m_notifyFilter & Security)
 	{
-		notifyFilter |= FILE_NOTIFY_CHANGE_SECURITY;
+		data->notifyFilter |= FILE_NOTIFY_CHANGE_SECURITY;
 	}
 	
-	HANDLE changeHandle = FindFirstChangeNotificationA(m_path.c_str(), m_includeSubdirectories, notifyFilter);
-	if (changeHandle == INVALID_HANDLE_VALUE)
+	data->directory = CreateFileA(
+		m_path.c_str(),
+		FILE_LIST_DIRECTORY | GENERIC_READ,
+		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+		nullptr,
+		OPEN_EXISTING,
+		FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+		nullptr);
+
+	if (data->directory == INVALID_HANDLE_VALUE)
 	{
 		return false;
 	}
 
+	data->waitHandle = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+	data->overlapped.hEvent = data->waitHandle;
+
 	if (!m_threadCancelEventHandle)
 	{
-		m_threadCancelEventHandle = CreateEvent(nullptr, true, false, nullptr);
-
-		if (!m_threadCancelEventHandle)
-		{
-			FindCloseChangeNotification(changeHandle);
-			return false;
-		}
+		m_threadCancelEventHandle = CreateEvent(nullptr, TRUE, FALSE, nullptr);
 	}
 	else
 	{
@@ -217,11 +212,7 @@ bool FileSystemWatcher::Start()
 
 	SetThreadRunning(true);
 
-#ifdef KE_WINDOWS
-	m_thread = std::thread(&FileSystemWatcher::ThreadProc, this, changeHandle);
-#elif defined KE_LINUX
-	m_thread = std::thread(&FileSystemWatcher::ThreadProc, this, _inotify_fd, _inotify_wd);
-#endif
+	m_thread = std::thread(&FileSystemWatcher::ThreadProc, this, std::move(data));
 
 	return true;
 }
@@ -242,7 +233,7 @@ void FileSystemWatcher::Stop()
 		m_thread.join();
 	}
 
-	m_changeEvents = std::queue<int>();
+	m_changeEvents = std::queue<std::unique_ptr<ChangeEvent>>();
 }
 
 void FileSystemWatcher::OnGameFrame(bool simulating)
@@ -253,6 +244,14 @@ void FileSystemWatcher::OnGameFrame(bool simulating)
 
 		while (!m_changeEvents.empty())
 		{
+			std::unique_ptr<ChangeEvent> &front = m_changeEvents.front();
+
+			if (m_onChanged && m_onChanged->IsRunnable())
+			{
+				m_onChanged->PushString(front->m_fullPath.c_str());
+				m_onChanged->Execute(nullptr);
+			}
+
 			m_changeEvents.pop();
 		}
 
@@ -269,16 +268,9 @@ void FileSystemWatcher::OnPluginUnloaded(SourceMod::IPlugin* plugin)
 {
 	IPluginContext* context = plugin->GetBaseContext();
 
-	for (auto it = m_pluginCallbacks.begin(); it != m_pluginCallbacks.end(); )
+	if (m_onChanged->GetParentContext() == context)
 	{
-		if ((*it)->GetParentContext() == context)
-		{
-			it = m_pluginCallbacks.erase(it);
-		}
-		else
-		{
-			it++;
-		}
+		m_onChanged = nullptr;
 	}
 }
 
@@ -304,36 +296,66 @@ void FileSystemWatcher::RequestCancelThread()
 #endif
 }
 
-#ifdef KE_WINDOWS
-void FileSystemWatcher::ThreadProc(HANDLE changeHandle)
-#elif defined KE_LINUX
-void FileSystemWatcher::ThreadProc(int _inotify_fd, int _inotify_wd)
-#endif
+void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadData> &data)
 {
 #ifdef KE_WINDOWS
 	HANDLE waitHandles[2];
-	waitHandles[0] = changeHandle;
+	waitHandles[0] = data->waitHandle;
 	waitHandles[1] = m_threadCancelEventHandle;
 
 	while (true)
 	{
-		DWORD waitStatus = WaitForMultipleObjects(2, waitHandles, FALSE, INFINITE);
-
-		switch (waitStatus) 
+		if (!ReadDirectoryChangesW(data->directory,
+			data->buffer,
+			sizeof data->buffer,
+			data->watchSubTree,
+			data->notifyFilter,
+			&data->bytesReturned,
+			&data->overlapped,
+			nullptr))
 		{
-			case WAIT_TIMEOUT:
-			{
-				break;
-			}
+			goto terminate;
+		}
+
+		switch (WaitForMultipleObjects(2, waitHandles, FALSE, INFINITE))
+		{
 			case WAIT_OBJECT_0:
 			{
-				m_changeEventsMutex.lock();
-				m_changeEvents.push(0);
-				m_changeEventsMutex.unlock();
-
-				if (FindNextChangeNotification(waitHandles[0]) == FALSE)
+				DWORD dwBytes  = 0;
+				if (!GetOverlappedResult(data->directory, &data->overlapped, &dwBytes, TRUE))
 				{
 					goto terminate;
+				}
+
+				ResetEvent(waitHandles[0]);
+
+				if (dwBytes  == 0)
+				{
+					break;
+				}
+
+				std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+
+				char *p = data->buffer;
+				for (;;)
+				{
+					FILE_NOTIFY_INFORMATION* info = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(p);
+
+					std::unique_ptr<ChangeEvent> change = std::make_unique<ChangeEvent>();
+
+					std::wstring fullPath(info->FileName);
+					change->m_fullPath = converter.to_bytes(fullPath);
+
+					m_changeEventsMutex.lock();
+					m_changeEvents.push(std::move(change));
+					m_changeEventsMutex.unlock();
+
+					if (!info->NextEntryOffset)
+					{
+						break;
+					}
+
+					p += info->NextEntryOffset;
 				}
 
 				break;
@@ -345,6 +367,7 @@ void FileSystemWatcher::ThreadProc(int _inotify_fd, int _inotify_wd)
 			}
 			default:
 			{
+				goto terminate;
 				break;
 			}
 		}
@@ -412,13 +435,6 @@ void FileSystemWatcher::ThreadProc(int _inotify_fd, int _inotify_wd)
 #endif
 
 terminate:
-#ifdef KE_WINDOWS
-	FindCloseChangeNotification(waitHandles[0]);
-#elif defined KE_LINUX
-	inotify_rm_watch(_inotify_fd, _inotify_wd);
-	close(_inotify_fd);
-#endif
-
 	SetThreadRunning(false);
 }
 
@@ -582,6 +598,26 @@ cell_t Native_FileSystemWatcher_NotifyFilterSet(SourcePawn::IPluginContext *cont
 	return 0;
 }
 
+cell_t Native_FileSystemWatcher_OnChangedSet(SourcePawn::IPluginContext *context, const cell_t *params)
+{
+	FileSystemWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+	if (!watcher)
+	{
+		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
+		return 0;
+	}
+
+	SourcePawn::IPluginFunction* cb = context->GetFunctionById(params[2]);
+	if (!cb && params[2] != -1)
+	{
+		context->ReportError("Invalid function id %x", params[2]);
+		return 0;
+	}
+
+	watcher->m_onChanged = cb;
+	return 0;
+}
+
 cell_t Native_FileSystemWatcher_IsWatchingGet(SourcePawn::IPluginContext *context, const cell_t *params)
 {
 	FileSystemWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
@@ -626,6 +662,7 @@ sp_nativeinfo_s FileSystemWatcherManager::m_Natives[] =
 	{"FileSystemWatcher.IncludeSubdirectories.set", Native_FileSystemWatcher_IncludeSubdirectoriesSet},
 	{"FileSystemWatcher.NotifyFilter.get", Native_FileSystemWatcher_NotifyFilterGet},
 	{"FileSystemWatcher.NotifyFilter.set", Native_FileSystemWatcher_NotifyFilterSet},
+	{"FileSystemWatcher.OnChanged.set", Native_FileSystemWatcher_OnChangedSet},
 	{"FileSystemWatcher.IsWatching.get", Native_FileSystemWatcher_IsWatchingGet},
 	{"FileSystemWatcher.StartWatching", Native_FileSystemWatcher_StartWatching},
 	{"FileSystemWatcher.StopWatching", Native_FileSystemWatcher_StopWatching},

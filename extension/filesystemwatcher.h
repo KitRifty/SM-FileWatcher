@@ -67,12 +67,20 @@ public:
 	};
 
 private:
+	class ChangeEvent
+	{
+	public:
+		NotifyFilters m_flags;
+		std::string m_fullPath;
+	};
+
 	bool m_watching;
 	std::string m_path;
 
 public:
 	bool m_includeSubdirectories;
 	NotifyFilters m_notifyFilter;
+	SourcePawn::IPluginFunction* m_onChanged;
 
 private:
 #ifdef KE_WINDOWS
@@ -81,21 +89,59 @@ private:
 	int m_threadCancelEventHandle;
 #endif
 
+	struct ThreadData
+	{
+#ifdef KE_WINDOWS
+		BOOL watchSubTree;
+		DWORD notifyFilter;
+		HANDLE directory;
+		HANDLE waitHandle;
+		OVERLAPPED overlapped;
+		DWORD bytesReturned;
+		char buffer[4096];
+#elif defined KE_LINUX
+		int fd;
+		int wd;
+#endif
+
+		ThreadData()
+		{
+#ifdef KE_WINDOWS
+			directory = INVALID_HANDLE_VALUE;
+			waitHandle = nullptr;
+			ZeroMemory(&overlapped, sizeof OVERLAPPED);
+#endif
+		}
+
+		~ThreadData()
+		{
+#ifdef KE_WINDOWS
+			if (directory && directory != INVALID_HANDLE_VALUE)
+			{
+				CloseHandle(directory);
+			}
+
+			if (waitHandle && waitHandle != INVALID_HANDLE_VALUE)
+			{
+				CloseHandle(waitHandle);
+			}
+#elif defined KE_LINUX
+			inotify_rm_watch(_inotify_fd, _inotify_wd);
+			close(_inotify_fd);
+#endif
+		}
+	};
+
 	std::thread m_thread;
 	std::mutex m_threadRunningMutex;
 	bool m_threadRunning;
 	std::mutex m_changeEventsMutex;
-	std::queue<int> m_changeEvents;
-
-	std::vector<SourcePawn::IPluginFunction*> m_pluginCallbacks;
+	std::queue<std::unique_ptr<ChangeEvent>> m_changeEvents;
 
 	FileSystemWatcher(const char* path = "", const char* filter = "");
 
 public:
 	~FileSystemWatcher();
-
-	void AddPluginCallback(SourcePawn::IPluginFunction* cb);
-	void RemovePluginCallback(SourcePawn::IPluginFunction* cb);
 
 	bool IsWatching() const { return m_watching; }
 	bool Start();
@@ -110,11 +156,7 @@ private:
 
 	void RequestCancelThread();
 
-#ifdef KE_WINDOWS
-	void ThreadProc(HANDLE changeHandle);
-#elif defined KE_LINUX
-	void ThreadProc(int inotify_fd, int inotify_wd);
-#endif
+	void ThreadProc(std::unique_ptr<ThreadData> &data);
 
 	friend class FileSystemWatcherManager;
 };

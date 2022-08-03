@@ -45,6 +45,8 @@ enum FileSystemWatcherNotifyFilterFlags
 	FSW_NOTIFY_SECURITY = (1 << 8)          // The security settings of the file or folder.
 }
 
+typedef FileSystemWatcherOnChanged = function void(const char[] path);
+
 methodmap FileSystemWatcher < Handle
 {
 	property bool IsWatching
@@ -62,6 +64,11 @@ methodmap FileSystemWatcher < Handle
 	{
 		public native get();
 		public native set(FileSystemWatcherNotifyFilterFlags value);
+	}
+
+	property FileSystemWatcherOnChanged OnChanged
+	{
+		public native set(FileSystemWatcherOnChanged value);
 	}
 
 	public native FileSystemWatcher(const char[] path = "", const char[] filter = "");
