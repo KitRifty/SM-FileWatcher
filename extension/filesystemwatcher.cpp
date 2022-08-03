@@ -36,7 +36,6 @@
 
 #ifdef KE_LINUX
 #include <sys/eventfd.h>
-#include <fcntl.h>
 #include <poll.h>
 #endif
 
@@ -157,42 +156,41 @@ bool FileSystemWatcher::Start()
 		ResetEvent(m_threadCancelEventHandle);
 	}
 #elif defined KE_LINUX
-	int _inotify_fd = inotify_init1(IN_NONBLOCK);
-    if (_inotify_fd == -1)
+	data->fd = inotify_init1(IN_NONBLOCK);
+    if (data->fd == -1)
     {
 		return false;
     }
 
-	uint32_t mask = 0;
+	data->mask = 0;
 	if (m_notifyFilter & (FileName | DirectoryName))
 	{
-		mask |= IN_MOVE;
+		data->mask |= IN_MOVE;
 	}
 
 	if (m_notifyFilter & (Attributes | Security))
 	{
-		mask |= IN_ATTRIB;
+		data->mask |= IN_ATTRIB;
 	}
 
 	if (m_notifyFilter & LastWrite)
 	{
-		mask |= IN_MODIFY;
+		data->mask |= IN_MODIFY;
 	}
 
 	if (m_notifyFilter & LastAccess)
 	{
-		mask |= IN_ACCESS;
+		data->mask |= IN_ACCESS;
 	}
 
 	if (m_notifyFilter & CreationTime)
 	{
-		mask |= IN_CREATE;
+		data->mask |= IN_CREATE;
 	}
 
-	int _inotify_wd = inotify_add_watch(_inotify_fd, m_path.c_str(), mask);
-	if (_inotify_wd == -1)
+	data->wd = inotify_add_watch(data->fd, m_path.c_str(), data->mask);
+	if (data->wd == -1)
     {
-		close(_inotify_fd);
 		return false;
     }
 
@@ -205,7 +203,6 @@ bool FileSystemWatcher::Start()
 		uint64_t u;
 		read(m_threadCancelEventHandle, &u, sizeof(u));
 	}
-
 #endif
 
 	m_watching = true;
@@ -296,7 +293,45 @@ void FileSystemWatcher::RequestCancelThread()
 #endif
 }
 
-void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadData> &data)
+FileSystemWatcher::ThreadData::ThreadData()
+{
+#ifdef KE_WINDOWS
+	directory = INVALID_HANDLE_VALUE;
+	waitHandle = nullptr;
+	ZeroMemory(&overlapped, sizeof OVERLAPPED);
+#elif defined KE_LINUX
+	fd = -1;
+	wd = -1;
+	mask = 0;
+#endif
+}
+
+FileSystemWatcher::ThreadData::~ThreadData()
+{
+#ifdef KE_WINDOWS
+	if (directory && directory != INVALID_HANDLE_VALUE)
+	{
+		CloseHandle(directory);
+	}
+
+	if (waitHandle && waitHandle != INVALID_HANDLE_VALUE)
+	{
+		CloseHandle(waitHandle);
+	}
+#elif defined KE_LINUX
+	if (fcntl(fd, F_GETFD) != -1)
+	{
+		if (wd != -1)
+		{
+			inotify_rm_watch(fd, wd);
+		}
+
+		close(fd);
+	}
+#endif
+}
+
+void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadData> data)
 {
 #ifdef KE_WINDOWS
 	HANDLE waitHandles[2];
@@ -375,7 +410,7 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadData> &data)
 #elif defined KE_LINUX
 	pollfd fds[2];
 
-	fds[0].fd = _inotify_fd;
+	fds[0].fd = data->fd;
 	fds[0].events = POLLIN;
 
 	fds[1].fd = m_threadCancelEventHandle;
@@ -400,7 +435,7 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadData> &data)
 
 				while (true)
 				{
-					ssize_t len = read(_inotify_fd, buf, sizeof buf);
+					ssize_t len = read(data->fd, buf, sizeof buf);
 					
 					if (len == -1 && errno != EAGAIN) 
 					{
@@ -424,8 +459,11 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadData> &data)
 							break;
 						}
 
+						std::unique_ptr<ChangeEvent> change = std::make_unique<ChangeEvent>();
+						change->m_fullPath = event->name;
+
 						m_changeEventsMutex.lock();
-						m_changeEvents.push(0);
+						m_changeEvents.push(std::move(change));
 						m_changeEventsMutex.unlock();
 					}
 				}

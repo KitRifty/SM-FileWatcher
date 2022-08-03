@@ -43,8 +43,8 @@
 #include <Windows.h>
 #include <windef.h>
 #elif defined KE_LINUX
-#include <sys/eventfd.h>
 #include <sys/inotify.h>
+#include <fcntl.h>
 #endif
 
 #include <IPluginSys.h>
@@ -89,8 +89,9 @@ private:
 	int m_threadCancelEventHandle;
 #endif
 
-	struct ThreadData
+	class ThreadData
 	{
+	public:
 #ifdef KE_WINDOWS
 		BOOL watchSubTree;
 		DWORD notifyFilter;
@@ -102,34 +103,11 @@ private:
 #elif defined KE_LINUX
 		int fd;
 		int wd;
+		uint32_t mask;
 #endif
 
-		ThreadData()
-		{
-#ifdef KE_WINDOWS
-			directory = INVALID_HANDLE_VALUE;
-			waitHandle = nullptr;
-			ZeroMemory(&overlapped, sizeof OVERLAPPED);
-#endif
-		}
-
-		~ThreadData()
-		{
-#ifdef KE_WINDOWS
-			if (directory && directory != INVALID_HANDLE_VALUE)
-			{
-				CloseHandle(directory);
-			}
-
-			if (waitHandle && waitHandle != INVALID_HANDLE_VALUE)
-			{
-				CloseHandle(waitHandle);
-			}
-#elif defined KE_LINUX
-			inotify_rm_watch(_inotify_fd, _inotify_wd);
-			close(_inotify_fd);
-#endif
-		}
+		ThreadData();
+		~ThreadData();
 	};
 
 	std::thread m_thread;
@@ -156,7 +134,7 @@ private:
 
 	void RequestCancelThread();
 
-	void ThreadProc(std::unique_ptr<ThreadData> &data);
+	void ThreadProc(std::unique_ptr<ThreadData> data);
 
 	friend class FileSystemWatcherManager;
 };
