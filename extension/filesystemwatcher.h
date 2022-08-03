@@ -39,9 +39,11 @@
 #include <mutex>
 
 #ifdef KE_WINDOWS
+#define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #include <windef.h>
 #elif defined KE_LINUX
+#include <sys/eventfd.h>
 #include <sys/inotify.h>
 #endif
 
@@ -76,14 +78,13 @@ private:
 #ifdef KE_WINDOWS
 	HANDLE m_threadCancelEventHandle;
 #elif defined KE_LINUX
-	int m_inotify_fd;
-	int m_inotify_wd;
-	bool m_threadCancelEventHandle;
+	int m_threadCancelEventHandle;
 #endif
 
 	std::thread m_thread;
+	std::mutex m_threadRunningMutex;
 	bool m_threadRunning;
-	std::mutex m_mutex;
+	std::mutex m_changeEventsMutex;
 	std::queue<int> m_changeEvents;
 
 	std::vector<SourcePawn::IPluginFunction*> m_pluginCallbacks;
@@ -104,10 +105,15 @@ private:
 	void OnGameFrame(bool simulating);
 	void OnPluginUnloaded(SourceMod::IPlugin* plugin);
 
+	bool IsThreadRunning();
+	void SetThreadRunning(bool state);
+
+	void RequestCancelThread();
+
 #ifdef KE_WINDOWS
 	void ThreadProc(HANDLE changeHandle);
 #elif defined KE_LINUX
-	void ThreadProc();
+	void ThreadProc(int inotify_fd, int inotify_wd);
 #endif
 
 	friend class FileSystemWatcherManager;

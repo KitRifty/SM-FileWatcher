@@ -29,7 +29,14 @@
 
 #include "filesystemwatcher.h"
 #include "smsdk_ext.h"
-#include "am-string.h"
+#include <am-string.h>
+#include <os/am-fsutil.h>
+
+#ifdef KE_LINUX
+#include <sys/eventfd.h>
+#include <fcntl.h>
+#include <poll.h>
+#endif
 
 FileSystemWatcher::FileSystemWatcher(const char* path, const char* filter) :
 	m_watching(false),
@@ -39,9 +46,7 @@ FileSystemWatcher::FileSystemWatcher(const char* path, const char* filter) :
 #ifdef KE_WINDOWS
 	m_threadCancelEventHandle(nullptr),
 #elif defined KE_LINUX
-	m_inotify_fd(-1),
-	m_inotify_wd(-1),
-	m_threadCancelEventHandle(false),
+	m_threadCancelEventHandle(-1),
 #endif
 	m_thread(),
 	m_threadRunning(false)
@@ -56,6 +61,11 @@ FileSystemWatcher::~FileSystemWatcher()
 	if (m_threadCancelEventHandle)
 	{
 		CloseHandle(m_threadCancelEventHandle);
+	}
+#elif defined KE_LINUX
+	if (fcntl(m_threadCancelEventHandle, F_GETFD) != -1)
+	{
+		close(m_threadCancelEventHandle);	
 	}
 #endif
 }
@@ -82,6 +92,11 @@ bool FileSystemWatcher::Start()
 	if (IsWatching())
 	{
 		return true;
+	}
+
+	if (!ke::file::PathExists(m_path.c_str()))
+	{
+		return false;
 	}
 
 #ifdef KE_WINDOWS
@@ -147,8 +162,8 @@ bool FileSystemWatcher::Start()
 		ResetEvent(m_threadCancelEventHandle);
 	}
 #elif defined KE_LINUX
-	m_inotify_fd = inotify_init();
-    if (m_inotify_fd == -1)
+	int _inotify_fd = inotify_init1(IN_NONBLOCK);
+    if (_inotify_fd == -1)
     {
 		return false;
     }
@@ -159,7 +174,7 @@ bool FileSystemWatcher::Start()
 		mask |= IN_MOVE;
 	}
 
-	if (m_notifyFilter & Attributes)
+	if (m_notifyFilter & (Attributes | Security))
 	{
 		mask |= IN_ATTRIB;
 	}
@@ -179,25 +194,33 @@ bool FileSystemWatcher::Start()
 		mask |= IN_CREATE;
 	}
 
-	m_inotify_wd = inotify_add_watch(m_inotify_fd, m_path.c_str(), mask);
-	if (m_inotify_wd == -1)
+	int _inotify_wd = inotify_add_watch(_inotify_fd, m_path.c_str(), mask);
+	if (_inotify_wd == -1)
     {
-		close(m_inotify_fd);
+		close(_inotify_fd);
 		return false;
     }
 
-	m_threadCancelEventHandle = false;
+	if (fcntl(m_threadCancelEventHandle, F_GETFD) == -1)
+	{
+		m_threadCancelEventHandle = eventfd(0, 0);
+	}
+	else
+	{
+		uint64_t u;
+		read(m_threadCancelEventHandle, &u, sizeof(u));
+	}
 
 #endif
 
 	m_watching = true;
 
-	m_threadRunning = true;
+	SetThreadRunning(true);
 
 #ifdef KE_WINDOWS
 	m_thread = std::thread(&FileSystemWatcher::ThreadProc, this, changeHandle);
 #elif defined KE_LINUX
-	m_thread = std::thread(&FileSystemWatcher::ThreadProc, this);
+	m_thread = std::thread(&FileSystemWatcher::ThreadProc, this, _inotify_fd, _inotify_wd);
 #endif
 
 	return true;
@@ -212,13 +235,7 @@ void FileSystemWatcher::Stop()
 
 	m_watching = false;
 
-#ifdef KE_WINDOWS
-	SetEvent(m_threadCancelEventHandle);
-#elif defined KE_LINUX
-	m_mutex.lock();
-	m_threadCancelEventHandle = true;
-	m_mutex.unlock();
-#endif
+	RequestCancelThread();
 
 	if (m_thread.joinable())
 	{
@@ -232,18 +249,16 @@ void FileSystemWatcher::OnGameFrame(bool simulating)
 {
 	if (IsWatching())
 	{
-		m_mutex.lock();
+		m_changeEventsMutex.lock();
 
 		while (!m_changeEvents.empty())
 		{
 			m_changeEvents.pop();
 		}
 
-		bool threadRunning = m_threadRunning;
+		m_changeEventsMutex.unlock();
 
-		m_mutex.unlock();
-
-		if (!threadRunning)
+		if (!IsThreadRunning())
 		{
 			Stop();
 		}
@@ -267,10 +282,32 @@ void FileSystemWatcher::OnPluginUnloaded(SourceMod::IPlugin* plugin)
 	}
 }
 
+bool FileSystemWatcher::IsThreadRunning()
+{
+	std::lock_guard<std::mutex> lock(m_threadRunningMutex);
+	return m_threadRunning;
+}
+
+void FileSystemWatcher::SetThreadRunning(bool state)
+{
+	std::lock_guard<std::mutex> lock(m_threadRunningMutex);
+	m_threadRunning = state;
+}
+
+void FileSystemWatcher::RequestCancelThread()
+{
+#ifdef KE_WINDOWS
+	SetEvent(m_threadCancelEventHandle);
+#elif defined KE_LINUX
+	uint64_t u = 1;
+	write(m_threadCancelEventHandle, &u, sizeof(u));
+#endif
+}
+
 #ifdef KE_WINDOWS
 void FileSystemWatcher::ThreadProc(HANDLE changeHandle)
 #elif defined KE_LINUX
-void FileSystemWatcher::ThreadProc()
+void FileSystemWatcher::ThreadProc(int _inotify_fd, int _inotify_wd)
 #endif
 {
 #ifdef KE_WINDOWS
@@ -313,60 +350,76 @@ void FileSystemWatcher::ThreadProc()
 		}
 	}
 #elif defined KE_LINUX
+	pollfd fds[2];
+
+	fds[0].fd = _inotify_fd;
+	fds[0].events = POLLIN;
+
+	fds[1].fd = m_threadCancelEventHandle;
+	fds[1].events = POLLIN;
+
 	while (true)
 	{
-		m_mutex.lock();
-		bool cancelled = m_threadCancelEventHandle;	
-		m_mutex.unlock();
+		int poll_num = poll(fds, 2, -1);
 
-		if (cancelled)
+		if (poll_num > 0)
 		{
-			break;
-		}
-
-		const int EVENT_SIZE = sizeof(struct inotify_event);
-		const int BUF_LEN = 1024 * (EVENT_SIZE + 100);
-
-		char buffer[BUF_LEN];
-    	struct inotify_event* event;
-
-		int length = read(m_inotify_fd, buffer, BUF_LEN);
-        if (length == -1)
-        {
-            break;
-        }
-
-		for (int i = 0; i < length;)
-        {
-			event = (struct inotify_event*) &(buffer[i]);
-
-			if (event->len) 
-            {
-				m_mutex.lock();
-				m_changeEvents.push(0);
-				m_mutex.unlock();
+			if (fds[1].revents & POLLIN)
+			{
+				goto terminate;
+				break;
 			}
 
-			i += EVENT_SIZE + event->len;
+			if (fds[0].revents & POLLIN)
+			{
+				char buf[4096] __attribute__ ((aligned(__alignof__(inotify_event))));
+				char *ptr;
+
+				while (true)
+				{
+					ssize_t len = read(_inotify_fd, buf, sizeof buf);
+					
+					if (len == -1 && errno != EAGAIN) 
+					{
+						goto terminate;
+						break;
+					}
+
+					if (len <= 0)
+					{
+						break;
+					}
+
+					const inotify_event* event;
+					for (char* ptr = buf; ptr < buf + len; ptr += sizeof(inotify_event) + event->len)
+					{
+						event = (const inotify_event*)ptr;
+
+						if (event->mask & IN_IGNORED)
+						{
+							goto terminate;
+							break;
+						}
+
+						m_changeEventsMutex.lock();
+						m_changeEvents.push(0);
+						m_changeEventsMutex.unlock();
+					}
+				}
+			}
 		}
-	}	
+	}
 #endif
 
 terminate:
 #ifdef KE_WINDOWS
 	FindCloseChangeNotification(waitHandles[0]);
 #elif defined KE_LINUX
-	m_mutex.lock();
-	inotify_rm_watch(m_inotify_fd, m_inotify_wd);
-	close(m_inotify_fd);
-	m_inotify_fd = -1;
-	m_inotify_wd = -1;
-	m_mutex.unlock();
+	inotify_rm_watch(_inotify_fd, _inotify_wd);
+	close(_inotify_fd);
 #endif
 
-	m_mutex.lock();
-	m_threadRunning = false;
-	m_mutex.unlock();
+	SetThreadRunning(false);
 }
 
 FileSystemWatcherManager g_FileSystemWatchers;
