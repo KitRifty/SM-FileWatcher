@@ -38,9 +38,10 @@ FileSystemWatcher::FileSystemWatcher(const char* path, const char* filter) :
 	m_notifyFilter(None),
 #ifdef KE_WINDOWS
 	m_threadCancelEventHandle(nullptr),
+#elif defined KE_LINUX
+#endif
 	m_thread(),
 	m_threadRunning(false)
-#endif
 {
 }
 
@@ -147,10 +148,8 @@ bool FileSystemWatcher::Start()
 
 	m_watching = true;
 
-#ifdef KE_WINDOWS
 	m_threadRunning = true;
 	m_thread = std::thread(&FileSystemWatcher::ThreadProc, this, changeHandle);
-#endif
 
 	return true;
 }
@@ -164,12 +163,20 @@ void FileSystemWatcher::Stop()
 
 	m_watching = false;
 
-	std::lock_guard<std::mutex> lock(m_mutex);
-
 #ifdef KE_WINDOWS
 	SetEvent(m_threadCancelEventHandle);
-	m_thread.join();
+#elif defined KE_LINUX
+	m_mutex.lock();
+
+	// TODO
+
+	m_mutex.unlock();
 #endif
+
+	if (m_thread.joinable())
+	{
+		m_thread.join();
+	}
 
 	m_changeEvents = std::queue<int>();
 }
@@ -178,19 +185,21 @@ void FileSystemWatcher::OnGameFrame(bool simulating)
 {
 	if (IsWatching())
 	{
-		std::lock_guard<std::mutex> lock(m_mutex);
+		m_mutex.lock();
 
 		while (!m_changeEvents.empty())
 		{
 			m_changeEvents.pop();
 		}
 
-#ifdef KE_WINDOWS
-		if (!m_threadRunning)
+		bool threadRunning = m_threadRunning;
+
+		m_mutex.unlock();
+
+		if (!threadRunning)
 		{
 			Stop();
 		}
-#endif
 	}
 }
 
@@ -256,10 +265,16 @@ void FileSystemWatcher::ThreadProc()
 			}
 		}
 	}
+#elif defined KE_LINUX
+
+	// TODO
+
 #endif
 
 terminate:
+#ifdef KE_WINDOWS
 	FindCloseChangeNotification(waitHandles[0]);
+#endif
 
 	m_mutex.lock();
 	m_threadRunning = false;

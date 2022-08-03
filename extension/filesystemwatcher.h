@@ -73,12 +73,12 @@ public:
 private:
 #ifdef KE_WINDOWS
 	HANDLE m_threadCancelEventHandle;
-	std::thread m_thread;
-	bool m_threadRunning;
 #elif defined KE_LINUX
 
 #endif
 
+	std::thread m_thread;
+	bool m_threadRunning;
 	std::mutex m_mutex;
 	std::queue<int> m_changeEvents;
 
