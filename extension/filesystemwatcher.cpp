@@ -327,9 +327,9 @@ void FileSystemWatcher::ThreadProc(int _inotify_fd, int _inotify_wd)
 			}
 			case WAIT_OBJECT_0:
 			{
-				m_mutex.lock();
+				m_changeEventsMutex.lock();
 				m_changeEvents.push(0);
-				m_mutex.unlock();
+				m_changeEventsMutex.unlock();
 
 				if (FindNextChangeNotification(waitHandles[0]) == FALSE)
 				{
