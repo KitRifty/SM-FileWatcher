@@ -35,17 +35,14 @@
 enum FileSystemWatcherNotifyFilterFlags
 {
 	FSW_NOTIFY_NONE = 0,
-	FSW_NOTIFY_FILE_NAME = (1 << 0),        // The name of the file.
-	FSW_NOTIFY_DIR_NAME = (1 << 1),         // The name of the directory.
-	FSW_NOTIFY_ATTRIBUTES = (1 << 2),       // The attributes of the file or folder.
-	FSW_NOTIFY_SIZE = (1 << 3),             // The size of the file or folder.
-	FSW_NOTIFY_LASTWRITE = (1 << 4),        // The date the file or folder last had anything written on it.
-	FSW_NOTIFY_LASTACCESS = (1 << 5),       // The date the file or folder was last opened.
-	FSW_NOTIFY_CREATIONTIME = (1 << 6),     // The time the file or folder was created.
-	FSW_NOTIFY_SECURITY = (1 << 8)          // The security settings of the file or folder.
-}
+	FSW_NOTIFY_CREATED = (1 << 0),
+	FSW_NOTIFY_DELETED = (1 << 1),
+	FSW_NOTIFY_MODIFIED = (1 << 2),
+	FSW_NOTIFY_RENAMED = (1 << 3)
+};
 
-typedef FileSystemWatcherOnChanged = function void(const char[] path);
+typedef FileSystemWatcherOnChanged = function void(FileSystemWatcher fsw, const char[] path);
+typedef FileSystemWatcherOnRenamed = function void(FileSystemWatcher fsw, const char[] oldPath, const char[] newPath);
 
 methodmap FileSystemWatcher < Handle
 {
@@ -66,9 +63,24 @@ methodmap FileSystemWatcher < Handle
 		public native set(FileSystemWatcherNotifyFilterFlags value);
 	}
 
-	property FileSystemWatcherOnChanged OnChanged
+	property FileSystemWatcherOnChanged OnCreated
 	{
 		public native set(FileSystemWatcherOnChanged value);
+	}
+
+	property FileSystemWatcherOnChanged OnDeleted
+	{
+		public native set(FileSystemWatcherOnChanged value);
+	}
+
+	property FileSystemWatcherOnChanged OnModified
+	{
+		public native set(FileSystemWatcherOnChanged value);
+	}
+
+	property FileSystemWatcherOnRenamed OnRenamed
+	{
+		public native set(FileSystemWatcherOnRenamed value);
 	}
 
 	public native FileSystemWatcher(const char[] path = "", const char[] filter = "");

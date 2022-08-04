@@ -55,23 +55,20 @@ class FileSystemWatcher
 public:
 	enum NotifyFilters
 	{
-		None = 0,
-		FileName = (1 << 0),         // The name of the file.
-		DirectoryName = (1 << 1),    // The name of the directory.
-		Attributes = (1 << 2),       // The attributes of the file or folder.
-		Size = (1 << 3),             // The size of the file or folder.
-		LastWrite = (1 << 4),        // The date the file or folder last had anything written on it.
-		LastAccess = (1 << 5),       // The date the file or folder was last opened.
-		CreationTime = (1 << 6),     // The time the file or folder was created.
-		Security = (1 << 8)          // The security settings of the file or folder.
+		FSW_NOTIFY_NONE = 0,
+		FSW_NOTIFY_CREATED = (1 << 0),
+		FSW_NOTIFY_DELETED = (1 << 1),
+		FSW_NOTIFY_MODIFIED = (1 << 2),
+		FSW_NOTIFY_RENAMED = (1 << 3)
 	};
 
 private:
 	class ChangeEvent
 	{
 	public:
-		NotifyFilters m_flags;
-		std::string m_fullPath;
+		NotifyFilters flags;
+		std::string lastPath;
+		std::string path;
 	};
 
 	bool m_watching;
@@ -80,7 +77,11 @@ private:
 public:
 	bool m_includeSubdirectories;
 	NotifyFilters m_notifyFilter;
-	SourcePawn::IPluginFunction* m_onChanged;
+	SourceMod::Handle_t m_Handle;
+	SourcePawn::IPluginFunction* m_onCreated;
+	SourcePawn::IPluginFunction* m_onDeleted;
+	SourcePawn::IPluginFunction* m_onModified;
+	SourcePawn::IPluginFunction* m_onRenamed;
 
 private:
 #ifdef KE_WINDOWS
@@ -92,14 +93,12 @@ private:
 	class ThreadData
 	{
 	public:
+		bool includeSubdirectories;
+		NotifyFilters notifyFilters;
 #ifdef KE_WINDOWS
-		BOOL watchSubTree;
-		DWORD notifyFilter;
+		DWORD dwNotifyFilter;
 		HANDLE directory;
-		HANDLE waitHandle;
-		OVERLAPPED overlapped;
-		DWORD bytesReturned;
-		char buffer[4096];
+		HANDLE changeEvent;
 #elif defined KE_LINUX
 		int fd;
 		int wd;
@@ -136,6 +135,8 @@ private:
 
 	void ThreadProc(std::unique_ptr<ThreadData> data);
 
+	void ProcessEvents();
+
 	friend class FileSystemWatcherManager;
 };
 
@@ -144,7 +145,7 @@ class FileSystemWatcherManager :
 	public SourceMod::IPluginsListener
 {
 private:
-	SourceMod::HandleType_t m_HandleType;
+	static SourceMod::HandleType_t m_HandleType;
 	static sp_nativeinfo_t m_Natives[];
 
 	std::vector<FileSystemWatcher*> m_watchers;

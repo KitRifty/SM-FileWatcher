@@ -43,8 +43,12 @@ FileSystemWatcher::FileSystemWatcher(const char* path, const char* filter) :
 	m_watching(false),
 	m_path(path),
 	m_includeSubdirectories(false),
-	m_notifyFilter(None),
-	m_onChanged(nullptr),
+	m_notifyFilter(FSW_NOTIFY_NONE),
+	m_Handle(0),
+	m_onCreated(nullptr),
+	m_onDeleted(nullptr),
+	m_onModified(nullptr),
+	m_onRenamed(nullptr),
 #ifdef KE_WINDOWS
 	m_threadCancelEventHandle(nullptr),
 #elif defined KE_LINUX
@@ -85,49 +89,25 @@ bool FileSystemWatcher::Start()
 	}
 
 	std::unique_ptr<ThreadData> data = std::make_unique<ThreadData>();
+	data->includeSubdirectories = m_includeSubdirectories;
+	data->notifyFilters = m_notifyFilter;
 
 #ifdef KE_WINDOWS
-	data->watchSubTree = m_includeSubdirectories;
-	data->notifyFilter = 0;
+	data->dwNotifyFilter = 0;
 
-	if (m_notifyFilter & FileName)
+	if (m_notifyFilter & (FSW_NOTIFY_RENAMED | FSW_NOTIFY_CREATED | FSW_NOTIFY_DELETED))
 	{
-		data->notifyFilter |= FILE_NOTIFY_CHANGE_FILE_NAME;
-	}
-
-	if (m_notifyFilter & DirectoryName)
-	{
-		data->notifyFilter |= FILE_NOTIFY_CHANGE_DIR_NAME;
+		data->dwNotifyFilter |= FILE_NOTIFY_CHANGE_FILE_NAME;
+		data->dwNotifyFilter |= FILE_NOTIFY_CHANGE_DIR_NAME;
 	}
 	
-	if (m_notifyFilter & Attributes)
+	if (m_notifyFilter & FSW_NOTIFY_MODIFIED)
 	{
-		data->notifyFilter |= FILE_NOTIFY_CHANGE_ATTRIBUTES;
-	}
-
-	if (m_notifyFilter & Size)
-	{
-		data->notifyFilter |= FILE_NOTIFY_CHANGE_SIZE;
-	}
-
-	if (m_notifyFilter & LastWrite)
-	{
-		data->notifyFilter |= FILE_NOTIFY_CHANGE_LAST_WRITE;
-	}
-
-	if (m_notifyFilter & LastAccess)
-	{
-		data->notifyFilter |= FILE_NOTIFY_CHANGE_LAST_ACCESS;
-	}
-
-	if (m_notifyFilter & CreationTime)
-	{
-		data->notifyFilter |= FILE_NOTIFY_CHANGE_CREATION;
-	}
-	
-	if (m_notifyFilter & Security)
-	{
-		data->notifyFilter |= FILE_NOTIFY_CHANGE_SECURITY;
+		data->dwNotifyFilter |= FILE_NOTIFY_CHANGE_ATTRIBUTES;
+		data->dwNotifyFilter |= FILE_NOTIFY_CHANGE_SIZE;
+		data->dwNotifyFilter |= FILE_NOTIFY_CHANGE_LAST_WRITE;
+		data->dwNotifyFilter |= FILE_NOTIFY_CHANGE_SECURITY;
+		data->dwNotifyFilter |= FILE_NOTIFY_CHANGE_CREATION;
 	}
 	
 	data->directory = CreateFileA(
@@ -144,8 +124,7 @@ bool FileSystemWatcher::Start()
 		return false;
 	}
 
-	data->waitHandle = CreateEvent(nullptr, TRUE, FALSE, nullptr);
-	data->overlapped.hEvent = data->waitHandle;
+	data->changeEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
 
 	if (!m_threadCancelEventHandle)
 	{
@@ -157,10 +136,10 @@ bool FileSystemWatcher::Start()
 	}
 #elif defined KE_LINUX
 	data->fd = inotify_init1(IN_NONBLOCK);
-    if (data->fd == -1)
-    {
+	if (data->fd == -1)
+	{
 		return false;
-    }
+	}
 
 	data->mask = 0;
 	if (m_notifyFilter & (FileName | DirectoryName))
@@ -190,9 +169,9 @@ bool FileSystemWatcher::Start()
 
 	data->wd = inotify_add_watch(data->fd, m_path.c_str(), data->mask);
 	if (data->wd == -1)
-    {
+	{
 		return false;
-    }
+	}
 
 	if (fcntl(m_threadCancelEventHandle, F_GETFD) == -1)
 	{
@@ -230,6 +209,8 @@ void FileSystemWatcher::Stop()
 		m_thread.join();
 	}
 
+	ProcessEvents();
+
 	m_changeEvents = std::queue<std::unique_ptr<ChangeEvent>>();
 }
 
@@ -237,27 +218,7 @@ void FileSystemWatcher::OnGameFrame(bool simulating)
 {
 	if (IsWatching())
 	{
-		m_changeEventsMutex.lock();
-
-		while (!m_changeEvents.empty())
-		{
-			std::unique_ptr<ChangeEvent> &front = m_changeEvents.front();
-
-			if (m_onChanged && m_onChanged->IsRunnable())
-			{
-				m_onChanged->PushString(front->m_fullPath.c_str());
-				m_onChanged->Execute(nullptr);
-			}
-
-			m_changeEvents.pop();
-		}
-
-		m_changeEventsMutex.unlock();
-
-		if (!IsThreadRunning())
-		{
-			Stop();
-		}
+		ProcessEvents();
 	}
 }
 
@@ -265,9 +226,24 @@ void FileSystemWatcher::OnPluginUnloaded(SourceMod::IPlugin* plugin)
 {
 	IPluginContext* context = plugin->GetBaseContext();
 
-	if (m_onChanged->GetParentContext() == context)
+	if (m_onCreated && m_onCreated->GetParentContext() == context)
 	{
-		m_onChanged = nullptr;
+		m_onCreated = nullptr;
+	}
+
+	if (m_onDeleted && m_onDeleted->GetParentContext() == context)
+	{
+		m_onDeleted = nullptr;
+	}
+
+	if (m_onModified && m_onModified->GetParentContext() == context)
+	{
+		m_onModified = nullptr;
+	}
+
+	if (m_onRenamed && m_onRenamed->GetParentContext() == context)
+	{
+		m_onRenamed = nullptr;
 	}
 }
 
@@ -293,12 +269,11 @@ void FileSystemWatcher::RequestCancelThread()
 #endif
 }
 
-FileSystemWatcher::ThreadData::ThreadData()
+FileSystemWatcher::ThreadData::ThreadData() : includeSubdirectories(false)
 {
 #ifdef KE_WINDOWS
 	directory = INVALID_HANDLE_VALUE;
-	waitHandle = nullptr;
-	ZeroMemory(&overlapped, sizeof OVERLAPPED);
+	changeEvent = nullptr;
 #elif defined KE_LINUX
 	fd = -1;
 	wd = -1;
@@ -309,14 +284,14 @@ FileSystemWatcher::ThreadData::ThreadData()
 FileSystemWatcher::ThreadData::~ThreadData()
 {
 #ifdef KE_WINDOWS
+	if (changeEvent && changeEvent != INVALID_HANDLE_VALUE)
+	{
+		CloseHandle(changeEvent);
+	}
+
 	if (directory && directory != INVALID_HANDLE_VALUE)
 	{
 		CloseHandle(directory);
-	}
-
-	if (waitHandle && waitHandle != INVALID_HANDLE_VALUE)
-	{
-		CloseHandle(waitHandle);
 	}
 #elif defined KE_LINUX
 	if (fcntl(fd, F_GETFD) != -1)
@@ -335,18 +310,25 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadData> data)
 {
 #ifdef KE_WINDOWS
 	HANDLE waitHandles[2];
-	waitHandles[0] = data->waitHandle;
+	waitHandles[0] = data->changeEvent;
 	waitHandles[1] = m_threadCancelEventHandle;
+
+	OVERLAPPED overlapped;
+	ZeroMemory(&overlapped, sizeof overlapped);
+	overlapped.hEvent = data->changeEvent;
+
+	DWORD bytesReturned;
+	char buffer[4096];
 
 	while (true)
 	{
 		if (!ReadDirectoryChangesW(data->directory,
-			data->buffer,
-			sizeof data->buffer,
-			data->watchSubTree,
-			data->notifyFilter,
-			&data->bytesReturned,
-			&data->overlapped,
+			buffer,
+			sizeof buffer,
+			data->includeSubdirectories,
+			data->dwNotifyFilter,
+			&bytesReturned,
+			&overlapped,
 			nullptr))
 		{
 			goto terminate;
@@ -356,34 +338,94 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadData> data)
 		{
 			case WAIT_OBJECT_0:
 			{
-				DWORD dwBytes  = 0;
-				if (!GetOverlappedResult(data->directory, &data->overlapped, &dwBytes, TRUE))
+				DWORD dwBytes = 0;
+				if (!GetOverlappedResult(data->directory, &overlapped, &dwBytes, TRUE))
 				{
 					goto terminate;
 				}
 
-				ResetEvent(waitHandles[0]);
+				ResetEvent(data->changeEvent);
 
-				if (dwBytes  == 0)
+				if (dwBytes == 0)
 				{
 					break;
 				}
 
 				std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+				std::lock_guard<std::mutex> lock(m_changeEventsMutex);
 
-				char *p = data->buffer;
+				char *p = buffer;
 				for (;;)
 				{
 					FILE_NOTIFY_INFORMATION* info = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(p);
 
-					std::unique_ptr<ChangeEvent> change = std::make_unique<ChangeEvent>();
+					std::wstring fileName(info->FileName, info->FileNameLength / sizeof(wchar_t));
 
-					std::wstring fullPath(info->FileName, info->FileNameLength / 2);
-					change->m_fullPath = converter.to_bytes(fullPath);
+					switch (info->Action)
+					{
+						case FILE_ACTION_ADDED:
+						{
+							if (data->notifyFilters & FSW_NOTIFY_CREATED)
+							{
+								auto change = std::make_unique<ChangeEvent>();
+								change->flags = FSW_NOTIFY_CREATED;
+								change->path = converter.to_bytes(fileName);
 
-					m_changeEventsMutex.lock();
-					m_changeEvents.push(std::move(change));
-					m_changeEventsMutex.unlock();
+								m_changeEvents.push(std::move(change));
+							}
+
+							break;
+						}
+						case FILE_ACTION_REMOVED:
+						{
+							if (data->notifyFilters & FSW_NOTIFY_DELETED)
+							{
+								auto change = std::make_unique<ChangeEvent>();
+								change->flags = FSW_NOTIFY_DELETED;
+								change->path = converter.to_bytes(fileName);
+
+								m_changeEvents.push(std::move(change));
+							}
+							
+							break;
+						}
+						case FILE_ACTION_MODIFIED:
+						{
+							if (data->notifyFilters & FSW_NOTIFY_MODIFIED)
+							{
+								auto change = std::make_unique<ChangeEvent>();
+								change->flags = FSW_NOTIFY_MODIFIED;
+								change->path = converter.to_bytes(fileName);
+
+								m_changeEvents.push(std::move(change));
+							}
+
+							break;
+						}
+						case FILE_ACTION_RENAMED_OLD_NAME:
+						{
+							if (data->notifyFilters & FSW_NOTIFY_RENAMED)
+							{
+								auto change = std::make_unique<ChangeEvent>();
+								change->flags = FSW_NOTIFY_RENAMED;
+								change->lastPath = converter.to_bytes(fileName);
+
+								m_changeEvents.push(std::move(change));
+							}
+							
+							break;
+						}
+						case FILE_ACTION_RENAMED_NEW_NAME:
+						{
+							if (data->notifyFilters & FSW_NOTIFY_RENAMED)
+							{
+								auto &change = m_changeEvents.back();
+								change->path = converter.to_bytes(fileName);
+							}
+							
+							break;
+						}
+					}
 
 					if (!info->NextEntryOffset)
 					{
@@ -476,10 +518,63 @@ terminate:
 	SetThreadRunning(false);
 }
 
-FileSystemWatcherManager g_FileSystemWatchers;
+void FileSystemWatcher::ProcessEvents()
+{
+	std::lock_guard<std::mutex> lock(m_changeEventsMutex);
 
-FileSystemWatcherManager::FileSystemWatcherManager() : 
-	m_HandleType(0)
+	while (!m_changeEvents.empty())
+	{
+		std::unique_ptr<ChangeEvent> &front = m_changeEvents.front();
+
+		if (front->flags & FSW_NOTIFY_CREATED)
+		{
+			if (m_onCreated && m_onCreated->IsRunnable())
+			{
+				m_onCreated->PushCell(m_Handle);
+				m_onCreated->PushString(front->path.c_str());
+				m_onCreated->Execute(nullptr);
+			}
+		}
+
+		if (front->flags & FSW_NOTIFY_DELETED)
+		{
+			if (m_onDeleted && m_onDeleted->IsRunnable())
+			{
+				m_onDeleted->PushCell(m_Handle);
+				m_onDeleted->PushString(front->path.c_str());
+				m_onDeleted->Execute(nullptr);
+			}
+		}
+
+		if (front->flags & FSW_NOTIFY_MODIFIED)
+		{
+			if (m_onModified && m_onModified->IsRunnable())
+			{
+				m_onModified->PushCell(m_Handle);
+				m_onModified->PushString(front->path.c_str());
+				m_onModified->Execute(nullptr);
+			}
+		}
+
+		if (front->flags & FSW_NOTIFY_RENAMED)
+		{
+			if (m_onRenamed && m_onRenamed->IsRunnable())
+			{
+				m_onRenamed->PushCell(m_Handle);
+				m_onRenamed->PushString(front->lastPath.c_str());
+				m_onRenamed->PushString(front->path.c_str());
+				m_onRenamed->Execute(nullptr);
+			}
+		}
+
+		m_changeEvents.pop();
+	}
+}
+
+FileSystemWatcherManager g_FileSystemWatchers;
+SourceMod::HandleType_t FileSystemWatcherManager::m_HandleType(0);
+
+FileSystemWatcherManager::FileSystemWatcherManager()
 {
 }
 
@@ -529,8 +624,9 @@ void FileSystemWatcherManager::OnGameFrame(bool simulating)
 SourceMod::Handle_t FileSystemWatcherManager::CreateWatcher(SourcePawn::IPluginContext* context, const char* path, const char* filter)
 {
 	FileSystemWatcher* watcher = new FileSystemWatcher(path, filter);
+	watcher->m_Handle = handlesys->CreateHandle(m_HandleType, watcher, context->GetIdentity(), myself->GetIdentity(), nullptr);
 	m_watchers.push_back(watcher);
-	return handlesys->CreateHandle(m_HandleType, watcher, context->GetIdentity(), myself->GetIdentity(), nullptr);
+	return watcher->m_Handle;
 }
 
 FileSystemWatcher* FileSystemWatcherManager::GetWatcher(SourceMod::Handle_t handle)
@@ -636,7 +732,7 @@ cell_t Native_FileSystemWatcher_NotifyFilterSet(SourcePawn::IPluginContext *cont
 	return 0;
 }
 
-cell_t Native_FileSystemWatcher_OnChangedSet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t Native_FileSystemWatcher_OnCreatedSet(SourcePawn::IPluginContext *context, const cell_t *params)
 {
 	FileSystemWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
 	if (!watcher)
@@ -652,7 +748,67 @@ cell_t Native_FileSystemWatcher_OnChangedSet(SourcePawn::IPluginContext *context
 		return 0;
 	}
 
-	watcher->m_onChanged = cb;
+	watcher->m_onCreated = cb;
+	return 0;
+}
+
+cell_t Native_FileSystemWatcher_OnDeletedSet(SourcePawn::IPluginContext *context, const cell_t *params)
+{
+	FileSystemWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+	if (!watcher)
+	{
+		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
+		return 0;
+	}
+
+	SourcePawn::IPluginFunction* cb = context->GetFunctionById(params[2]);
+	if (!cb && params[2] != -1)
+	{
+		context->ReportError("Invalid function id %x", params[2]);
+		return 0;
+	}
+
+	watcher->m_onDeleted = cb;
+	return 0;
+}
+
+cell_t Native_FileSystemWatcher_OnModifiedSet(SourcePawn::IPluginContext *context, const cell_t *params)
+{
+	FileSystemWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+	if (!watcher)
+	{
+		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
+		return 0;
+	}
+
+	SourcePawn::IPluginFunction* cb = context->GetFunctionById(params[2]);
+	if (!cb && params[2] != -1)
+	{
+		context->ReportError("Invalid function id %x", params[2]);
+		return 0;
+	}
+
+	watcher->m_onModified = cb;
+	return 0;
+}
+
+cell_t Native_FileSystemWatcher_OnRenamedSet(SourcePawn::IPluginContext *context, const cell_t *params)
+{
+	FileSystemWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+	if (!watcher)
+	{
+		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
+		return 0;
+	}
+
+	SourcePawn::IPluginFunction* cb = context->GetFunctionById(params[2]);
+	if (!cb && params[2] != -1)
+	{
+		context->ReportError("Invalid function id %x", params[2]);
+		return 0;
+	}
+
+	watcher->m_onRenamed = cb;
 	return 0;
 }
 
@@ -700,7 +856,10 @@ sp_nativeinfo_s FileSystemWatcherManager::m_Natives[] =
 	{"FileSystemWatcher.IncludeSubdirectories.set", Native_FileSystemWatcher_IncludeSubdirectoriesSet},
 	{"FileSystemWatcher.NotifyFilter.get", Native_FileSystemWatcher_NotifyFilterGet},
 	{"FileSystemWatcher.NotifyFilter.set", Native_FileSystemWatcher_NotifyFilterSet},
-	{"FileSystemWatcher.OnChanged.set", Native_FileSystemWatcher_OnChangedSet},
+	{"FileSystemWatcher.OnCreated.set", Native_FileSystemWatcher_OnCreatedSet},
+	{"FileSystemWatcher.OnDeleted.set", Native_FileSystemWatcher_OnDeletedSet},
+	{"FileSystemWatcher.OnModified.set", Native_FileSystemWatcher_OnModifiedSet},
+	{"FileSystemWatcher.OnRenamed.set", Native_FileSystemWatcher_OnRenamedSet},
 	{"FileSystemWatcher.IsWatching.get", Native_FileSystemWatcher_IsWatchingGet},
 	{"FileSystemWatcher.StartWatching", Native_FileSystemWatcher_StartWatching},
 	{"FileSystemWatcher.StopWatching", Native_FileSystemWatcher_StopWatching},
