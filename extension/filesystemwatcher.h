@@ -37,6 +37,7 @@
 #include <memory>
 #include <thread>
 #include <mutex>
+#include <map>
 
 #ifdef KE_WINDOWS
 #define WIN32_LEAN_AND_MEAN
@@ -67,6 +68,9 @@ private:
 	{
 	public:
 		NotifyFilters flags;
+#ifdef KE_LINUX
+		uint32_t cookie;
+#endif
 		std::string lastPath;
 		std::string path;
 	};
@@ -93,6 +97,7 @@ private:
 	class ThreadData
 	{
 	public:
+		std::string root_path;
 		bool includeSubdirectories;
 		NotifyFilters notifyFilters;
 #ifdef KE_WINDOWS
@@ -101,12 +106,17 @@ private:
 		HANDLE changeEvent;
 #elif defined KE_LINUX
 		int fd;
-		int wd;
+		int root_wd;
+		std::map<int, std::string> wd;
 		uint32_t mask;
 #endif
 
 		ThreadData();
 		~ThreadData();
+
+#if defined KE_LINUX
+		int AddWatch(const std::string &baseRelPath, uint32_t _mask = 0);
+#endif
 	};
 
 	std::thread m_thread;
