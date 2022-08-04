@@ -378,7 +378,7 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadData> data)
 
 					std::unique_ptr<ChangeEvent> change = std::make_unique<ChangeEvent>();
 
-					std::wstring fullPath(info->FileName);
+					std::wstring fullPath(info->FileName, info->FileNameLength / 2);
 					change->m_fullPath = converter.to_bytes(fullPath);
 
 					m_changeEventsMutex.lock();
