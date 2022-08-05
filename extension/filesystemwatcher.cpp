@@ -40,11 +40,12 @@
 #include <poll.h>
 #endif
 
-FileSystemWatcher::FileSystemWatcher(const char* path, const char* filter) :
+FileSystemWatcher::FileSystemWatcher(const char* path) :
 	m_watching(false),
 	m_includeSubdirectories(false),
 	m_notifyFilter(FSW_NOTIFY_NONE),
 	m_Handle(0),
+	m_owningContext(nullptr),
 	m_onStarted(nullptr),
 	m_onStopped(nullptr),
 	m_onCreated(nullptr),
@@ -211,6 +212,7 @@ bool FileSystemWatcher::Start()
 
 size_t FileSystemWatcher::GetPath(char* buffer, size_t bufferSize)
 {
+	// TODO: Do not expose absolute path, only path relative to game directory only!
 	return ke::SafeStrcpy(buffer, bufferSize, m_path.c_str());
 }
 
@@ -244,6 +246,12 @@ void FileSystemWatcher::OnGameFrame(bool simulating)
 void FileSystemWatcher::OnPluginUnloaded(SourceMod::IPlugin* plugin)
 {
 	IPluginContext* context = plugin->GetBaseContext();
+
+	if (m_owningContext == context)
+	{
+		m_owningContext = nullptr;
+		Stop();
+	}
 
 	if (m_onStarted && m_onStarted->GetParentContext() == context)
 	{
@@ -876,9 +884,10 @@ void FileSystemWatcherManager::OnGameFrame(bool simulating)
 	}
 }
 
-SourceMod::Handle_t FileSystemWatcherManager::CreateWatcher(SourcePawn::IPluginContext* context, const char* path, const char* filter)
+SourceMod::Handle_t FileSystemWatcherManager::CreateWatcher(SourcePawn::IPluginContext* context, const char* path)
 {
-	FileSystemWatcher* watcher = new FileSystemWatcher(path, filter);
+	FileSystemWatcher* watcher = new FileSystemWatcher(path);
+	watcher->m_owningContext = context;
 	watcher->m_Handle = handlesys->CreateHandle(m_HandleType, watcher, context->GetIdentity(), myself->GetIdentity(), nullptr);
 	m_watchers.push_back(watcher);
 	return watcher->m_Handle;
@@ -925,16 +934,15 @@ void FileSystemWatcherManager::OnPluginUnloaded(SourceMod::IPlugin* plugin)
 
 cell_t Native_FileSystemWatcher(SourcePawn::IPluginContext *context, const cell_t *params)
 {
-	char* path = nullptr;
-	context->LocalToString(params[1], &path);
+	char* _path = nullptr;
+	context->LocalToString(params[1], &_path);
 
-	char* filter = nullptr;
-	context->LocalToString(params[2], &filter);
+	std::string path(_path);
 
 	char realPath[PLATFORM_MAX_PATH];
 	g_pSM->BuildPath(Path_Game, realPath, sizeof(realPath), "%s", path);
 
-	return g_FileSystemWatchers.CreateWatcher(context, realPath, filter);
+	return g_FileSystemWatchers.CreateWatcher(context, realPath);
 }
 
 cell_t Native_FileSystemWatcher_IncludeSubdirectoriesGet(SourcePawn::IPluginContext *context, const cell_t *params)

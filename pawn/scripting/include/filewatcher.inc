@@ -97,7 +97,7 @@ methodmap FileSystemWatcher < Handle
 
 	public native FileSystemWatcher(const char[] path = "");
 
-	public int GetPath(char[] buffer, int bufferSize);
+	public native int GetPath(char[] buffer, int bufferSize);
 
 	public native bool StartWatching();
 	public native bool StopWatching();

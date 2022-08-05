@@ -91,6 +91,7 @@ public:
 	NotifyFilters m_notifyFilter;
 	SourceMod::Handle_t m_Handle;
 
+	SourcePawn::IPluginContext* m_owningContext;
 	SourcePawn::IPluginFunction* m_onStarted;
 	SourcePawn::IPluginFunction* m_onStopped;
 	SourcePawn::IPluginFunction* m_onCreated;
@@ -137,7 +138,7 @@ private:
 	std::queue<std::unique_ptr<NotifyEvent>> m_changeEvents;
 	bool m_processingEvents;
 
-	FileSystemWatcher(const char* path = "", const char* filter = "");
+	FileSystemWatcher(const char* path = "");
 
 public:
 	~FileSystemWatcher();
@@ -180,7 +181,7 @@ public:
 	void SDK_OnUnload();
 	void OnGameFrame(bool simulating);
 
-	SourceMod::Handle_t CreateWatcher(SourcePawn::IPluginContext* context, const char* path, const char* filter);
+	SourceMod::Handle_t CreateWatcher(SourcePawn::IPluginContext* context, const char* path);
 	FileSystemWatcher* GetWatcher(SourceMod::Handle_t handle);
 
 	// IHandleTypeDispatch
