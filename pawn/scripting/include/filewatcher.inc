@@ -41,6 +41,8 @@ enum FileSystemWatcherNotifyFilterFlags
 	FSW_NOTIFY_RENAMED = (1 << 3)
 };
 
+typedef FileSystemWatcherOnStarted = function void(FileSystemWatcher fsw);
+typedef FileSystemWatcherOnStopped = function void(FileSystemWatcher fsw);
 typedef FileSystemWatcherOnChanged = function void(FileSystemWatcher fsw, const char[] path);
 typedef FileSystemWatcherOnRenamed = function void(FileSystemWatcher fsw, const char[] oldPath, const char[] newPath);
 
@@ -63,6 +65,16 @@ methodmap FileSystemWatcher < Handle
 		public native set(FileSystemWatcherNotifyFilterFlags value);
 	}
 
+	property FileSystemWatcherOnStarted OnStarted
+	{
+		public native set(FileSystemWatcherOnStarted value);
+	}
+
+	property FileSystemWatcherOnStopped OnStopped
+	{
+		public native set(FileSystemWatcherOnStopped value);
+	}
+
 	property FileSystemWatcherOnChanged OnCreated
 	{
 		public native set(FileSystemWatcherOnChanged value);
@@ -83,7 +95,9 @@ methodmap FileSystemWatcher < Handle
 		public native set(FileSystemWatcherOnRenamed value);
 	}
 
-	public native FileSystemWatcher(const char[] path = "", const char[] filter = "");
+	public native FileSystemWatcher(const char[] path = "");
+
+	public int GetPath(char[] buffer, int bufferSize);
 
 	public native bool StartWatching();
 	public native bool StopWatching();

@@ -64,9 +64,17 @@ public:
 	};
 
 private:
-	class ChangeEvent
+	class NotifyEvent
 	{
 	public:
+		enum NotifyEventType
+		{
+			FILESYSTEM = 0,
+			START,
+			EXIT
+		};
+
+		NotifyEventType type;
 		NotifyFilters flags;
 #ifdef KE_LINUX
 		uint32_t cookie;
@@ -82,6 +90,9 @@ public:
 	bool m_includeSubdirectories;
 	NotifyFilters m_notifyFilter;
 	SourceMod::Handle_t m_Handle;
+
+	SourcePawn::IPluginFunction* m_onStarted;
+	SourcePawn::IPluginFunction* m_onStopped;
 	SourcePawn::IPluginFunction* m_onCreated;
 	SourcePawn::IPluginFunction* m_onDeleted;
 	SourcePawn::IPluginFunction* m_onModified;
@@ -123,7 +134,8 @@ private:
 	std::mutex m_threadRunningMutex;
 	bool m_threadRunning;
 	std::mutex m_changeEventsMutex;
-	std::queue<std::unique_ptr<ChangeEvent>> m_changeEvents;
+	std::queue<std::unique_ptr<NotifyEvent>> m_changeEvents;
+	bool m_processingEvents;
 
 	FileSystemWatcher(const char* path = "", const char* filter = "");
 
@@ -131,6 +143,7 @@ public:
 	~FileSystemWatcher();
 
 	bool IsWatching() const { return m_watching; }
+	size_t GetPath(char* buffer, size_t bufferSize);
 	bool Start();
 	void Stop();
 

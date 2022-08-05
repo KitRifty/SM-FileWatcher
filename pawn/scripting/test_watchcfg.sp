@@ -3,10 +3,7 @@
 
 public void OnPluginStart()
 {
-	char path[PLATFORM_MAX_PATH];
-	BuildPath(Path_SM, path, sizeof(path), "cfg");
-
-	FileSystemWatcher fsw = new FileSystemWatcher(path);
+	FileSystemWatcher fsw = new FileSystemWatcher("cfg");
 	fsw.IncludeSubdirectories = true;
 	fsw.NotifyFilter = FSW_NOTIFY_CREATED | FSW_NOTIFY_DELETED | FSW_NOTIFY_MODIFIED | FSW_NOTIFY_RENAMED;
 	fsw.OnCreated = OnCreated;
@@ -16,11 +13,7 @@ public void OnPluginStart()
 
 	if (fsw.StartWatching())
 	{
-		PrintToServer("Now watching directory sourcemod/cfg for changes.");
-	}
-	else
-	{
-		PrintToServer("FAILED to watch directory sourcemod/cfg for changes.")
+		PrintToServer("Now watching your cfg/ folder for changes.");
 	}
 }
 
