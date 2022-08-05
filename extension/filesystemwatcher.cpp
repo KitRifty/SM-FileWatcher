@@ -1175,6 +1175,7 @@ sp_nativeinfo_s FileSystemWatcherManager::m_Natives[] =
 	{"FileSystemWatcher.OnModified.set", Native_FileSystemWatcher_OnModifiedSet},
 	{"FileSystemWatcher.OnRenamed.set", Native_FileSystemWatcher_OnRenamedSet},
 	{"FileSystemWatcher.IsWatching.get", Native_FileSystemWatcher_IsWatchingGet},
+	{"FileSystemWatcher.GetPath", Native_FileSystemWatcher_GetPath},
 	{"FileSystemWatcher.StartWatching", Native_FileSystemWatcher_StartWatching},
 	{"FileSystemWatcher.StopWatching", Native_FileSystemWatcher_StopWatching},
 	{NULL,			NULL},
