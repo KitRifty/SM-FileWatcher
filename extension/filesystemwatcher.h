@@ -107,29 +107,12 @@ private:
 	int m_threadCancelEventHandle;
 #endif
 
-	class ThreadData
+	class ThreadConfig
 	{
 	public:
 		std::string root_path;
 		bool includeSubdirectories;
 		NotifyFilters notifyFilters;
-#ifdef KE_WINDOWS
-		DWORD dwNotifyFilter;
-		HANDLE directory;
-		HANDLE changeEvent;
-#elif defined KE_LINUX
-		int fd;
-		int root_wd;
-		std::map<int, std::string> wd;
-		uint32_t mask;
-#endif
-
-		ThreadData();
-		~ThreadData();
-
-#if defined KE_LINUX
-		int AddWatch(const std::string &baseRelPath, uint32_t _mask = 0);
-#endif
 	};
 
 	std::thread m_thread;
@@ -159,7 +142,7 @@ private:
 
 	void RequestCancelThread();
 
-	void ThreadProc(std::unique_ptr<ThreadData> data);
+	void ThreadProc(std::unique_ptr<ThreadConfig> data);
 
 	void ProcessEvents();
 

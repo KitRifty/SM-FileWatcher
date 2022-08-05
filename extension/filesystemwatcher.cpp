@@ -103,47 +103,12 @@ bool FileSystemWatcher::Start()
 		return true;
 	}
 
-	if (!ke::file::IsDirectory(m_path.c_str()))
-	{
-		return false;
-	}
-
-	std::unique_ptr<ThreadData> data = std::make_unique<ThreadData>();
+	std::unique_ptr<ThreadConfig> data = std::make_unique<ThreadConfig>();
 	data->root_path = m_path;
 	data->includeSubdirectories = m_includeSubdirectories;
 	data->notifyFilters = m_notifyFilter;
 
 #ifdef KE_WINDOWS
-	data->dwNotifyFilter = 0;
-
-	if (m_notifyFilter & (FSW_NOTIFY_RENAMED | FSW_NOTIFY_CREATED | FSW_NOTIFY_DELETED))
-	{
-		data->dwNotifyFilter |= FILE_NOTIFY_CHANGE_FILE_NAME;
-		data->dwNotifyFilter |= FILE_NOTIFY_CHANGE_DIR_NAME;
-	}
-	
-	if (m_notifyFilter & FSW_NOTIFY_MODIFIED)
-	{
-		data->dwNotifyFilter |= FILE_NOTIFY_CHANGE_SIZE;
-		data->dwNotifyFilter |= FILE_NOTIFY_CHANGE_LAST_WRITE;
-	}
-	
-	data->directory = CreateFileA(
-		m_path.c_str(),
-		FILE_LIST_DIRECTORY | GENERIC_READ,
-		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-		nullptr,
-		OPEN_EXISTING,
-		FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
-		nullptr);
-
-	if (data->directory == INVALID_HANDLE_VALUE)
-	{
-		return false;
-	}
-
-	data->changeEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
-
 	if (!m_threadCancelEventHandle)
 	{
 		m_threadCancelEventHandle = CreateEvent(nullptr, TRUE, FALSE, nullptr);
@@ -153,47 +118,6 @@ bool FileSystemWatcher::Start()
 		ResetEvent(m_threadCancelEventHandle);
 	}
 #elif defined KE_LINUX
-	data->fd = inotify_init1(IN_NONBLOCK);
-	if (data->fd == -1)
-	{
-		return false;
-	}
-
-	data->mask = 0;
-
-	if (data->includeSubdirectories)
-	{
-		data->mask |= (IN_CREATE | IN_MOVE);
-	}
-	else
-	{
-		if (m_notifyFilter & FSW_NOTIFY_CREATED)
-		{
-			data->mask |= IN_CREATE;
-		}
-
-		if (m_notifyFilter & FSW_NOTIFY_RENAMED)
-		{
-			data->mask |= IN_MOVE;
-		}
-	}
-
-	if (m_notifyFilter & FSW_NOTIFY_DELETED)
-	{
-		data->mask |= IN_DELETE;
-	}
-
-	if (m_notifyFilter & FSW_NOTIFY_MODIFIED)
-	{
-		data->mask |= IN_CLOSE_WRITE;
-	}
-
-	data->root_wd = data->AddWatch("", IN_DELETE_SELF | IN_MOVE_SELF);
-	if (data->root_wd == -1)
-	{
-		return false;
-	}
-
 	if (fcntl(m_threadCancelEventHandle, F_GETFD) == -1)
 	{
 		m_threadCancelEventHandle = eventfd(0, 0);
@@ -206,9 +130,6 @@ bool FileSystemWatcher::Start()
 #endif
 
 	m_watching = true;
-
-	SetThreadRunning(true);
-
 	m_thread = std::thread(&FileSystemWatcher::ThreadProc, this, std::move(data));
 
 	return true;
@@ -314,20 +235,33 @@ void FileSystemWatcher::RequestCancelThread()
 #endif
 }
 
-FileSystemWatcher::ThreadData::ThreadData() : includeSubdirectories(false)
+class ThreadData
 {
+public:
 #ifdef KE_WINDOWS
-	directory = INVALID_HANDLE_VALUE;
-	changeEvent = nullptr;
+	HANDLE directory;
+	HANDLE changeEvent;
 #elif defined KE_LINUX
-	fd = -1;
-	root_wd = -1;
-	mask = 0;
+	int fd;
+	int root_wd;
+	std::map<int, std::string> wd;
+	uint32_t mask;
 #endif
-}
 
-FileSystemWatcher::ThreadData::~ThreadData()
-{
+	ThreadData()
+	{
+#ifdef KE_WINDOWS
+		directory = INVALID_HANDLE_VALUE;
+		changeEvent = nullptr;
+#elif defined KE_LINUX
+		fd = -1;
+		root_wd = -1;
+		mask = 0;
+#endif
+	}
+
+	~ThreadData()
+	{
 #ifdef KE_WINDOWS
 	if (changeEvent && changeEvent != INVALID_HANDLE_VALUE)
 	{
@@ -349,57 +283,60 @@ FileSystemWatcher::ThreadData::~ThreadData()
 		close(fd);
 	}
 #endif
-}
+	}
 
-#ifdef KE_LINUX
-int FileSystemWatcher::ThreadData::AddWatch(const std::string &relPath, uint32_t _mask)
-{
-	int _wd = -1;
-	_mask |= mask;
-	
-	std::string absPath(root_path);
-	absPath.append(relPath);
-
-	_wd = inotify_add_watch(fd, absPath.c_str(), _mask);
-	if (_wd != -1)
+#if defined KE_LINUX
+	int AddWatch(const std::string &baseRelPath, uint32_t _mask = 0)
 	{
-		auto it = wd.find(_wd);
-		if (it != wd.end())
-		{
-			wd.erase(it);
-		}
+		int _wd = -1;
+		_mask |= mask;
 		
-		wd.emplace(_wd, relPath);
-	}
+		std::string absPath(root_path);
+		absPath.append(relPath);
 
-	if (includeSubdirectories)
-	{
-		DIR *dir;
-		dirent *ent;
-		if ((dir = opendir(absPath.c_str())) != nullptr) 
+		_wd = inotify_add_watch(fd, absPath.c_str(), _mask);
+		if (_wd != -1)
 		{
-			while ((ent = readdir(dir)) != nullptr)
+			auto it = wd.find(_wd);
+			if (it != wd.end())
 			{
-				if (ent->d_type == DT_DIR && ent->d_name[0] != '.')
-				{
-					std::string dirPath(relPath);
-					dirPath.append(ent->d_name);
-					dirPath.push_back('/');
-
-					AddWatch(dirPath, mask);
-				}
+				wd.erase(it);
 			}
-
-			closedir(dir);
+			
+			wd.emplace(_wd, relPath);
 		}
+
+		if (includeSubdirectories)
+		{
+			DIR *dir;
+			dirent *ent;
+			if ((dir = opendir(absPath.c_str())) != nullptr) 
+			{
+				while ((ent = readdir(dir)) != nullptr)
+				{
+					if (ent->d_type == DT_DIR && ent->d_name[0] != '.')
+					{
+						std::string dirPath(relPath);
+						dirPath.append(ent->d_name);
+						dirPath.push_back('/');
+
+						AddWatch(dirPath, mask);
+					}
+				}
+
+				closedir(dir);
+			}
+		}
+
+		return _wd;
 	}
-
-	return _wd;
-}
 #endif
+};
 
-void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadData> data)
+void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadConfig> config)
 {
+	SetThreadRunning(true);
+
 	{
 		std::lock_guard<std::mutex> lock(m_changeEventsMutex);
 
@@ -408,7 +345,43 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadData> data)
 		m_changeEvents.push(std::move(ev));
 	}
 
+	if (!ke::file::IsDirectory(config->root_path.c_str()))
+	{
+		goto terminate;
+	}
+
+	std::unique_ptr<ThreadData> data = std::make_unique<ThreadData>();
+
 #ifdef KE_WINDOWS
+	DWORD dwNotifyFilter = 0;
+
+	if (config->notifyFilters & (FSW_NOTIFY_RENAMED | FSW_NOTIFY_CREATED | FSW_NOTIFY_DELETED))
+	{
+		dwNotifyFilter |= FILE_NOTIFY_CHANGE_FILE_NAME;
+		dwNotifyFilter |= FILE_NOTIFY_CHANGE_DIR_NAME;
+	}
+	
+	if (config->notifyFilters & FSW_NOTIFY_MODIFIED)
+	{
+		dwNotifyFilter |= FILE_NOTIFY_CHANGE_LAST_WRITE;
+	}
+	
+	data->directory = CreateFileA(
+		m_path.c_str(),
+		FILE_LIST_DIRECTORY | GENERIC_READ,
+		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+		nullptr,
+		OPEN_EXISTING,
+		FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+		nullptr);
+
+	if (data->directory == INVALID_HANDLE_VALUE)
+	{
+		goto terminate;
+	}
+
+	data->changeEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+
 	HANDLE waitHandles[2];
 	waitHandles[0] = data->changeEvent;
 	waitHandles[1] = m_threadCancelEventHandle;
@@ -425,8 +398,8 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadData> data)
 		if (!ReadDirectoryChangesW(data->directory,
 			buffer,
 			sizeof buffer,
-			data->includeSubdirectories,
-			data->dwNotifyFilter,
+			config->includeSubdirectories,
+			dwNotifyFilter,
 			&bytesReturned,
 			&overlapped,
 			nullptr))
@@ -452,7 +425,7 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadData> data)
 				}
 
 				std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
-				std::lock_guard<std::mutex> lock(m_changeEventsMutex);
+				std::vector<std::unique_ptr<NotifyEvent>> queuedEvents;
 
 				char *p = buffer;
 				for (;;)
@@ -465,12 +438,32 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadData> data)
 					{
 						case FILE_ACTION_ADDED:
 						{
-							if (data->notifyFilters & FSW_NOTIFY_CREATED)
+							if (config->notifyFilters & (FSW_NOTIFY_CREATED | FSW_NOTIFY_RENAMED))
 							{
+								std::string path = converter.to_bytes(fileName);
+
+								if ((config->notifyFilters & FSW_NOTIFY_RENAMED) && !queuedEvents.empty())
+								{
+									auto &change = queuedEvents.back();
+									if (change->flags == FSW_NOTIFY_DELETED)
+									{
+										std::string me = path.substr(path.find_last_of("/\\") + 1);
+										std::string them = change->path.substr(path.find_last_of("/\\") + 1);
+
+										if (me == them)
+										{
+											change->flags = FSW_NOTIFY_RENAMED;
+											change->lastPath = change->path;
+											change->path = path;
+											break;
+										}
+									}
+								}
+
 								auto change = std::make_unique<NotifyEvent>();
 								change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
 								change->flags = FSW_NOTIFY_CREATED;
-								change->path = converter.to_bytes(fileName);
+								change->path = path;
 
 								m_changeEvents.push(std::move(change));
 							}
@@ -479,7 +472,7 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadData> data)
 						}
 						case FILE_ACTION_REMOVED:
 						{
-							if (data->notifyFilters & FSW_NOTIFY_DELETED)
+							if (config->notifyFilters & (FSW_NOTIFY_DELETED | FSW_NOTIFY_RENAMED))
 							{
 								auto change = std::make_unique<NotifyEvent>();
 								change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
@@ -493,7 +486,7 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadData> data)
 						}
 						case FILE_ACTION_MODIFIED:
 						{
-							if (data->notifyFilters & FSW_NOTIFY_MODIFIED)
+							if (config->notifyFilters & FSW_NOTIFY_MODIFIED)
 							{
 								auto change = std::make_unique<NotifyEvent>();
 								change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
@@ -507,7 +500,7 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadData> data)
 						}
 						case FILE_ACTION_RENAMED_OLD_NAME:
 						{
-							if (data->notifyFilters & FSW_NOTIFY_RENAMED)
+							if (config->notifyFilters & FSW_NOTIFY_RENAMED)
 							{
 								auto change = std::make_unique<NotifyEvent>();
 								change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
@@ -521,7 +514,7 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadData> data)
 						}
 						case FILE_ACTION_RENAMED_NEW_NAME:
 						{
-							if (data->notifyFilters & FSW_NOTIFY_RENAMED)
+							if (config->notifyFilters & FSW_NOTIFY_RENAMED)
 							{
 								auto &change = m_changeEvents.back();
 								change->path = converter.to_bytes(fileName);
@@ -539,6 +532,17 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadData> data)
 					p += info->NextEntryOffset;
 				}
 
+				std::lock_guard<std::mutex> lock(m_changeEventsMutex);
+
+				for (auto it = queuedEvents.begin(); it != queuedEvents.end(); it++)
+				{
+					auto &change = *it;
+					if (change->flags & config->notifyFilters)
+					{
+						m_changeEvents.push(std::move(*it));
+					}
+				}
+
 				break;
 			}
 			case WAIT_OBJECT_0 + 1:
@@ -554,6 +558,47 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadData> data)
 		}
 	}
 #elif defined KE_LINUX
+	data->fd = inotify_init1(IN_NONBLOCK);
+	if (data->fd == -1)
+	{
+		goto terminate;
+	}
+
+	data->mask = 0;
+
+	if (config->includeSubdirectories)
+	{
+		data->mask |= (IN_CREATE | IN_MOVE);
+	}
+	else
+	{
+		if (config->notifyFilters & FSW_NOTIFY_CREATED)
+		{
+			data->mask |= IN_CREATE;
+		}
+
+		if (config->notifyFilters & FSW_NOTIFY_RENAMED)
+		{
+			data->mask |= IN_MOVE;
+		}
+	}
+
+	if (config->notifyFilters & FSW_NOTIFY_DELETED)
+	{
+		data->mask |= IN_DELETE;
+	}
+
+	if (config->notifyFilters & FSW_NOTIFY_MODIFIED)
+	{
+		data->mask |= IN_CLOSE_WRITE;
+	}
+
+	data->root_wd = data->AddWatch("", IN_DELETE_SELF | IN_MOVE_SELF);
+	if (data->root_wd == -1)
+	{
+		goto terminate;
+	}
+
 	pollfd fds[2];
 
 	fds[0].fd = data->fd;
@@ -625,7 +670,7 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadData> data)
 
 						if (event->mask & (IN_CREATE | IN_MOVED_TO))
 						{
-							if (m_includeSubdirectories && (event->mask & IN_ISDIR))
+							if (config->includeSubdirectories && (event->mask & IN_ISDIR))
 							{
 								std::string relPath(baseRelPath);
 								relPath.append(event->name);
@@ -710,7 +755,7 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadData> data)
 
 						if (event->mask & IN_CLOSE_WRITE)
 						{
-							if (data->notifyFilters & FSW_NOTIFY_MODIFIED)
+							if (config->notifyFilters & FSW_NOTIFY_MODIFIED)
 							{
 								std::unique_ptr<NotifyEvent> change = std::make_unique<NotifyEvent>();
 								change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
@@ -730,7 +775,7 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadData> data)
 				for (auto it = queuedEvents.begin(); it != queuedEvents.end(); it++)
 				{
 					auto &change = *it;
-					if (change->flags & data->notifyFilters)
+					if (change->flags & config->notifyFilters)
 					{
 						m_changeEvents.push(std::move(*it));
 					}
