@@ -84,6 +84,7 @@ private:
 	};
 
 	bool m_watching;
+	std::string m_relPath;
 	std::string m_path;
 
 public:
@@ -138,13 +139,14 @@ private:
 	std::queue<std::unique_ptr<NotifyEvent>> m_changeEvents;
 	bool m_processingEvents;
 
-	FileSystemWatcher(const char* path = "");
+	FileSystemWatcher(const std::string &relPath);
 
 public:
 	~FileSystemWatcher();
 
 	bool IsWatching() const { return m_watching; }
-	size_t GetPath(char* buffer, size_t bufferSize);
+	size_t GetAbsolutePath(char* buffer, size_t bufferSize);
+	size_t GetRelativePath(char* buffer, size_t bufferSize);
 	bool Start();
 	void Stop();
 
@@ -181,7 +183,7 @@ public:
 	void SDK_OnUnload();
 	void OnGameFrame(bool simulating);
 
-	SourceMod::Handle_t CreateWatcher(SourcePawn::IPluginContext* context, const char* path);
+	SourceMod::Handle_t CreateWatcher(SourcePawn::IPluginContext* context, const std::string &path);
 	FileSystemWatcher* GetWatcher(SourceMod::Handle_t handle);
 
 	// IHandleTypeDispatch

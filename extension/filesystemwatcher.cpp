@@ -40,7 +40,7 @@
 #include <poll.h>
 #endif
 
-FileSystemWatcher::FileSystemWatcher(const char* path) :
+FileSystemWatcher::FileSystemWatcher(const std::string &relPath) :
 	m_watching(false),
 	m_includeSubdirectories(false),
 	m_notifyFilter(FSW_NOTIFY_NONE),
@@ -61,18 +61,22 @@ FileSystemWatcher::FileSystemWatcher(const char* path) :
 	m_threadRunning(false),
 	m_processingEvents(false)
 {
-	char fixedPath[PLATFORM_MAX_PATH];
-	ke::path::Format(fixedPath, sizeof fixedPath, "%s", path);
-	m_path = fixedPath;
+	char buffer[PLATFORM_MAX_PATH];
+	ke::path::Format(buffer, sizeof(buffer), relPath.c_str());
+	m_relPath = buffer;
 
-	if (m_path.begin() != m_path.end() && (m_path.back() != '/' && m_path.back() != '\\'))
+	if (!m_relPath.empty() && (m_relPath.back() != '/' && m_relPath.back() != '\\'))
 	{
 #ifdef KE_WINDOWS
-		m_path.push_back('\\');
+		m_relPath.push_back('\\');
 #else
-		m_path.push_back('/');
+		m_relPath.push_back('/');
 #endif
 	}
+
+	g_pSM->BuildPath(Path_Game, buffer, sizeof(buffer), "%s", m_relPath.c_str());
+
+	m_path = buffer;
 }
 
 FileSystemWatcher::~FileSystemWatcher()
@@ -210,10 +214,14 @@ bool FileSystemWatcher::Start()
 	return true;
 }
 
-size_t FileSystemWatcher::GetPath(char* buffer, size_t bufferSize)
+size_t FileSystemWatcher::GetAbsolutePath(char* buffer, size_t bufferSize)
 {
-	// TODO: Do not expose absolute path, only path relative to game directory only!
 	return ke::SafeStrcpy(buffer, bufferSize, m_path.c_str());
+}
+
+size_t FileSystemWatcher::GetRelativePath(char* buffer, size_t bufferSize)
+{
+	return ke::SafeStrcpy(buffer, bufferSize, m_relPath.c_str());
 }
 
 void FileSystemWatcher::Stop()
@@ -884,7 +892,7 @@ void FileSystemWatcherManager::OnGameFrame(bool simulating)
 	}
 }
 
-SourceMod::Handle_t FileSystemWatcherManager::CreateWatcher(SourcePawn::IPluginContext* context, const char* path)
+SourceMod::Handle_t FileSystemWatcherManager::CreateWatcher(SourcePawn::IPluginContext* context, const std::string &path)
 {
 	FileSystemWatcher* watcher = new FileSystemWatcher(path);
 	watcher->m_owningContext = context;
@@ -939,10 +947,7 @@ cell_t Native_FileSystemWatcher(SourcePawn::IPluginContext *context, const cell_
 
 	std::string path(_path);
 
-	char realPath[PLATFORM_MAX_PATH];
-	g_pSM->BuildPath(Path_Game, realPath, sizeof(realPath), "%s", path);
-
-	return g_FileSystemWatchers.CreateWatcher(context, realPath);
+	return g_FileSystemWatchers.CreateWatcher(context, path);
 }
 
 cell_t Native_FileSystemWatcher_IncludeSubdirectoriesGet(SourcePawn::IPluginContext *context, const cell_t *params)
@@ -1141,7 +1146,7 @@ cell_t Native_FileSystemWatcher_GetPath(SourcePawn::IPluginContext *context, con
 
 	int bufferSize = params[3];
 
-	return watcher->GetPath(buffer, bufferSize);
+	return watcher->GetRelativePath(buffer, bufferSize);
 }
 
 cell_t Native_FileSystemWatcher_StartWatching(SourcePawn::IPluginContext *context, const cell_t *params)
