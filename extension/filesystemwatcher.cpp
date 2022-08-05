@@ -292,13 +292,13 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadConfig> config)
 		}
 
 #if defined KE_LINUX
-		int AddWatch(const std::string &baseRelPath, uint32_t _mask = 0)
+		int AddWatch(const std::unique_ptr<ThreadConfig> &config, const std::string &path, uint32_t _mask = 0)
 		{
 			int _wd = -1;
 			_mask |= mask;
 			
-			std::string absPath(root_path);
-			absPath.append(relPath);
+			std::string absPath(config->root_path);
+			absPath.append(path);
 
 			_wd = inotify_add_watch(fd, absPath.c_str(), _mask);
 			if (_wd != -1)
@@ -309,10 +309,10 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadConfig> config)
 					wd.erase(it);
 				}
 				
-				wd.emplace(_wd, relPath);
+				wd.emplace(_wd, path);
 			}
 
-			if (includeSubdirectories)
+			if (config->includeSubdirectories)
 			{
 				DIR *dir;
 				dirent *ent;
@@ -322,11 +322,11 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadConfig> config)
 					{
 						if (ent->d_type == DT_DIR && ent->d_name[0] != '.')
 						{
-							std::string dirPath(relPath);
+							std::string dirPath(path);
 							dirPath.append(ent->d_name);
 							dirPath.push_back('/');
 
-							AddWatch(dirPath, mask);
+							AddWatch(config, dirPath, mask);
 						}
 					}
 
@@ -618,7 +618,7 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadConfig> config)
 		data->mask |= IN_CLOSE_WRITE;
 	}
 
-	data->root_wd = data->AddWatch("", IN_DELETE_SELF | IN_MOVE_SELF);
+	data->root_wd = data->AddWatch(config, "", IN_DELETE_SELF | IN_MOVE_SELF);
 	if (data->root_wd == -1)
 	{
 		goto terminate;
@@ -699,7 +699,7 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadConfig> config)
 								relPath.append(event->name);
 								relPath.push_back('/');
 
-								data->AddWatch(relPath);
+								data->AddWatch(config, relPath);
 							}
 
 							if (event->mask & IN_MOVED_TO)
