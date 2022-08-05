@@ -13,10 +13,7 @@ public void OnPluginStart()
 	fsw.OnModified = OnModified;
 	fsw.OnRenamed = OnRenamed;
 
-	if (fsw.StartWatching())
-	{
-		
-	}
+	fsw.IsWatching = true;
 }
 
 void OnStarted(FileSystemWatcher fsw)
@@ -37,20 +34,20 @@ void OnStopped(FileSystemWatcher fsw)
 
 void OnCreated(FileSystemWatcher fsw, const char[] path)
 {
-	PrintToServer("+ %s", path);
+	PrintToServer("%0.4f: + %s", GetTickedTime(), path);
 }
 
 void OnDeleted(FileSystemWatcher fsw, const char[] path)
 {
-	PrintToServer("- %s", path);
+	PrintToServer("%0.4f: - %s", GetTickedTime(), path);
 }
 
 void OnModified(FileSystemWatcher fsw, const char[] path)
 {
-	PrintToServer("%s was modified", path);
+	PrintToServer("%0.4f: %s was modified", GetTickedTime(), path);
 }
 
 void OnRenamed(FileSystemWatcher fsw, const char[] oldPath, const char[] newPath)
 {
-	PrintToServer("%s -> %s", oldPath, newPath);
+	PrintToServer("%0.4f: %s -> %s", GetTickedTime(), oldPath, newPath);
 }

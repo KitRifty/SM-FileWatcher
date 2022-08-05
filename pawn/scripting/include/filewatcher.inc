@@ -48,59 +48,130 @@ typedef FileSystemWatcherOnRenamed = function void(FileSystemWatcher fsw, const 
 
 methodmap FileSystemWatcher < Handle
 {
+	/**
+	 * Indicates whether the watcher is enabled.
+	 * 
+	 * This should not be associated with the `OnStarted` and `OnStopped` callbacks. 
+	 * The callbacks listen to the file system and are fired based on if watching the
+	 * directory was successful or not and do not change this value in any way.
+	 */
 	property bool IsWatching
 	{
 		public native get();
+		public native set(bool value);
 	}
 
+	/**
+	 * Indicates whether subdirectories within the watched directory should 
+	 * be monitored.
+	 */
 	property bool IncludeSubdirectories
 	{
 		public native get();
 		public native set(bool value);
 	}
 
+	/**
+	 * The type of changes to watch for.
+	 */
 	property FileSystemWatcherNotifyFilterFlags NotifyFilter
 	{
 		public native get();
 		public native set(FileSystemWatcherNotifyFilterFlags value);
 	}
 
+	/**
+	 * The size (in bytes) of the internal buffer.
+	 */
+	property int InternalBufferSize
+	{
+		public native get();
+		public native set(int value);
+	}
+
+	/**
+	 * The callback for when the watcher begins receiving file system change events.
+	 */
 	property FileSystemWatcherOnStarted OnStarted
 	{
 		public native set(FileSystemWatcherOnStarted value);
 	}
 
+	/**
+	 * The callback for when the watcher stops receiving file system change events.
+	 * 
+	 * This can be triggered if the watcher is explicitly ordered to stop watching,
+	 * or the watched directory is deleted/moved.
+	 */
 	property FileSystemWatcherOnStopped OnStopped
 	{
 		public native set(FileSystemWatcherOnStopped value);
 	}
 
+	/**
+	 * The callback for when a file is created inside the watched directory or
+	 * a file is moved into the watched directory from a directory that wasn't
+	 * being watched.
+	 */
 	property FileSystemWatcherOnChanged OnCreated
 	{
 		public native set(FileSystemWatcherOnChanged value);
 	}
 
+	/**
+	 * The callback for when a file is deleted from the watched directory or
+	 * a file is moved out of the watched directory.
+	 */
 	property FileSystemWatcherOnChanged OnDeleted
 	{
 		public native set(FileSystemWatcherOnChanged value);
 	}
 
+	/**
+	 * The callback for when a file is changed or modified.
+	 */
 	property FileSystemWatcherOnChanged OnModified
 	{
 		public native set(FileSystemWatcherOnChanged value);
 	}
 
+	/**
+	 * The callback for when a file is renamed.
+	 * 
+	 * There are slight differences on when this is called depending on the
+	 * operating system, however in both Windows and Linux, changing the
+	 * name of the file will result in a Rename action.
+	 * 
+	 * For Windows: Moving a file from one directory to another is seen as two 
+	 * actions, Delete (from old directory) and Create (in new directory).
+	 * 
+	 * For Linux: Moving a file from one *watched* directory to another watched 
+	 * directory is seen as a Rename action.
+	 */
 	property FileSystemWatcherOnRenamed OnRenamed
 	{
 		public native set(FileSystemWatcherOnRenamed value);
 	}
 
+	/**
+	 * Creates a file watcher object. This listens to the file system for change 
+	 * notifications and raises events when a directory, or file in a directory, 
+	 * changes.
+	 * 
+	 * @param path    Path to directory. This path is relative to the game directory.
+	 */
 	public native FileSystemWatcher(const char[] path = "");
 
+	/**
+	 * Retrieves the path of the watched directory, relative to the game directory.
+	 * This will always be trailed with the OS's preferred path separator 
+	 * ("\\" for Windows, "/" for Linux).
+	 * 
+	 * @param buffer        Buffer to store the path.
+	 * @param bufferSize    Size of buffer.
+	 * @return              Number of bytes written.
+	 */
 	public native int GetPath(char[] buffer, int bufferSize);
-
-	public native bool StartWatching();
-	public native bool StopWatching();
 }
 
 /**

@@ -90,6 +90,8 @@ private:
 public:
 	bool m_includeSubdirectories;
 	NotifyFilters m_notifyFilter;
+	size_t m_bufferSize;
+
 	SourceMod::Handle_t m_Handle;
 
 	SourcePawn::IPluginContext* m_owningContext;
@@ -113,6 +115,7 @@ private:
 		std::string root_path;
 		bool includeSubdirectories;
 		NotifyFilters notifyFilters;
+		size_t bufferSize;
 	};
 
 	std::thread m_thread;
