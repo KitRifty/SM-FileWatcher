@@ -91,6 +91,7 @@ public:
 	bool m_includeSubdirectories;
 	NotifyFilters m_notifyFilter;
 	size_t m_bufferSize;
+	int m_retryInterval;
 
 	SourceMod::Handle_t m_Handle;
 
@@ -116,6 +117,7 @@ private:
 		bool includeSubdirectories;
 		NotifyFilters notifyFilters;
 		size_t bufferSize;
+		int retryInterval;
 	};
 
 	std::thread m_thread;

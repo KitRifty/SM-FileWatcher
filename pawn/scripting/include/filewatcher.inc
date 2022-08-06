@@ -51,9 +51,10 @@ methodmap FileSystemWatcher < Handle
 	/**
 	 * Indicates whether the watcher is enabled.
 	 * 
-	 * This should not be associated with the `OnStarted` and `OnStopped` callbacks. 
-	 * The callbacks listen to the file system and are fired based on if watching the
-	 * directory was successful or not and do not change this value in any way.
+	 * Upon setting this to true, the watcher will begin monitoring its directory.
+	 * However, events will not be sent to plugins until the first `OnGameFrame()` is
+	 * called, so consider only watching when events can be sent such as on/after
+	 * `OnMapStart()` or `OnConfigsExecuted()`.
 	 */
 	property bool IsWatching
 	{
@@ -81,7 +82,22 @@ methodmap FileSystemWatcher < Handle
 	}
 
 	/**
-	 * The size (in bytes) of the internal buffer.
+	 * If watching fails (such as directory being deleted or renamed), the watcher
+	 * will auto-retry every x milliseconds until it succeeds.
+	 */
+	property int RetryInterval
+	{
+		public native get();
+		public native set(int value);
+	}
+
+	/**
+	 * The size (in bytes) of the internal buffer. The size should be an interval
+	 * of 4KB.
+	 * 
+	 * Sometimes events can be missed which can happen with directories that arevery active. 
+	 * You may consider increasing the buffer size if the default size (8KB) isn't enough, 
+	 * but do not exceed 64KB.
 	 */
 	property int InternalBufferSize
 	{
@@ -157,6 +173,12 @@ methodmap FileSystemWatcher < Handle
 	 * Creates a file watcher object. This listens to the file system for change 
 	 * notifications and raises events when a directory, or file in a directory, 
 	 * changes.
+	 * 
+	 * It is not always guaranteed that the watcher will be receiving file change events
+	 * especially if the watched directory is deleted, renamed, or does not exist.
+	 * In this scenario, the watcher will retry watching the directory every `RetryInterval` 
+	 * milliseconds until it succeeds. The `OnStarted` and `OnStopped` callbacks
+	 * are invoked specifically for this scenario.
 	 * 
 	 * @param path    Path to directory. This path is relative to the game directory.
 	 */

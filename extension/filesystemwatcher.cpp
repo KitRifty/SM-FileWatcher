@@ -47,6 +47,7 @@ FileSystemWatcher::FileSystemWatcher(const std::string &relPath) :
 	m_includeSubdirectories(false),
 	m_notifyFilter(FSW_NOTIFY_NONE),
 	m_bufferSize(8192),
+	m_retryInterval(1000),
 	m_Handle(0),
 	m_owningContext(nullptr),
 	m_onStarted(nullptr),
@@ -111,6 +112,7 @@ bool FileSystemWatcher::Start()
 	config->includeSubdirectories = m_includeSubdirectories;
 	config->notifyFilters = m_notifyFilter;
 	config->bufferSize = m_bufferSize;
+	config->retryInterval = m_retryInterval;
 
 #ifdef KE_WINDOWS
 	if (!m_threadCancelEventHandle)
@@ -339,484 +341,523 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadConfig> config)
 #endif
 	};
 
-	SetThreadRunning(true);
+	bool isRunning = true;
 
+	while (isRunning)
 	{
-		std::lock_guard<std::mutex> lock(m_changeEventsMutex);
+		SetThreadRunning(true);
 
-		auto ev = std::make_unique<NotifyEvent>();
-		ev->type = NotifyEvent::NotifyEventType::START;
-		m_changeEvents.push(std::move(ev));
-	}
+		bool didStart = false;
 
-	std::unique_ptr<ThreadData> data = std::make_unique<ThreadData>();
-	std::unique_ptr<char[]> buffer(new char[config->bufferSize]);
+		std::unique_ptr<ThreadData> data = std::make_unique<ThreadData>();
+		std::unique_ptr<char[]> buffer(new char[config->bufferSize]);
 
-	if (!ke::file::IsDirectory(config->root_path.c_str()))
-	{
-		goto terminate;
-	}
-
-#ifdef KE_WINDOWS
-	DWORD dwNotifyFilter = 0;
-
-	if (config->notifyFilters & (FSW_NOTIFY_RENAMED | FSW_NOTIFY_CREATED | FSW_NOTIFY_DELETED))
-	{
-		dwNotifyFilter |= FILE_NOTIFY_CHANGE_FILE_NAME;
-		dwNotifyFilter |= FILE_NOTIFY_CHANGE_DIR_NAME;
-	}
-	
-	if (config->notifyFilters & FSW_NOTIFY_MODIFIED)
-	{
-		dwNotifyFilter |= FILE_NOTIFY_CHANGE_LAST_WRITE;
-	}
-	
-	data->directory = CreateFileA(
-		config->root_path.c_str(),
-		FILE_LIST_DIRECTORY | GENERIC_READ,
-		FILE_SHARE_READ | FILE_SHARE_WRITE,
-		nullptr,
-		OPEN_EXISTING,
-		FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
-		nullptr);
-
-	if (data->directory == INVALID_HANDLE_VALUE)
-	{
-		goto terminate;
-	}
-
-	data->changeEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
-
-	HANDLE waitHandles[2];
-	waitHandles[0] = data->changeEvent;
-	waitHandles[1] = m_threadCancelEventHandle;
-
-	OVERLAPPED overlapped;
-	ZeroMemory(&overlapped, sizeof overlapped);
-	overlapped.hEvent = data->changeEvent;
-
-	DWORD bytesReturned;
-
-	while (true)
-	{
-		if (!ReadDirectoryChangesW(data->directory,
-			buffer.get(),
-			config->bufferSize,
-			config->includeSubdirectories,
-			dwNotifyFilter,
-			&bytesReturned,
-			&overlapped,
-			nullptr))
+		if (!ke::file::IsDirectory(config->root_path.c_str()))
 		{
 			goto terminate;
 		}
 
-		switch (WaitForMultipleObjects(2, waitHandles, FALSE, INFINITE))
+#ifdef KE_WINDOWS
+		DWORD dwNotifyFilter = 0;
+
+		if (config->notifyFilters & (FSW_NOTIFY_RENAMED | FSW_NOTIFY_CREATED | FSW_NOTIFY_DELETED))
 		{
-			case WAIT_OBJECT_0:
-			{
-				DWORD dwBytes = 0;
-				if (!GetOverlappedResult(data->directory, &overlapped, &dwBytes, TRUE))
-				{
-					goto terminate;
-				}
-
-				ResetEvent(data->changeEvent);
-
-				if (dwBytes == 0)
-				{
-					break;
-				}
-
-				std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
-				std::vector<std::unique_ptr<NotifyEvent>> queuedEvents;
-
-				char *p = buffer.get();
-				for (;;)
-				{
-					FILE_NOTIFY_INFORMATION* info = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(p);
-
-					std::wstring fileName(info->FileName, info->FileNameLength / sizeof(wchar_t));
-
-					switch (info->Action)
-					{
-						case FILE_ACTION_ADDED:
-						{
-							if (config->notifyFilters & (FSW_NOTIFY_CREATED | FSW_NOTIFY_RENAMED))
-							{
-								std::string path = converter.to_bytes(fileName);
-
-								if (!queuedEvents.empty())
-								{
-									bool isRenameEvent = false;
-
-									for (auto it = queuedEvents.rbegin(); it != queuedEvents.rend(); it++)
-									{
-										auto &change = *it;
-
-										if (change->flags == FSW_NOTIFY_DELETED)
-										{
-											std::string me = GetFileNameFromPath(path);
-											std::string them = GetFileNameFromPath(change->path);
-
-											if (me == them)
-											{
-												change->flags = FSW_NOTIFY_RENAMED;
-												change->lastPath = change->path;
-												change->path = path;
-
-												isRenameEvent = true;
-												break;
-											}
-										}
-									}
-
-									if (isRenameEvent)
-									{
-										break;
-									}
-								}
-
-								auto change = std::make_unique<NotifyEvent>();
-								change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
-								change->flags = FSW_NOTIFY_CREATED;
-								change->path = path;
-
-								queuedEvents.push_back(std::move(change));
-							}
-
-							break;
-						}
-						case FILE_ACTION_REMOVED:
-						{
-							if (config->notifyFilters & (FSW_NOTIFY_DELETED | FSW_NOTIFY_RENAMED))
-							{
-								auto change = std::make_unique<NotifyEvent>();
-								change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
-								change->flags = FSW_NOTIFY_DELETED;
-								change->path = converter.to_bytes(fileName);
-
-								queuedEvents.push_back(std::move(change));
-							}
-							
-							break;
-						}
-						case FILE_ACTION_MODIFIED:
-						{
-							if (config->notifyFilters & FSW_NOTIFY_MODIFIED)
-							{
-								std::string path = converter.to_bytes(fileName);
-
-								std::string absPath(config->root_path);
-								absPath.append(path);
-
-								if (ke::file::IsDirectory(absPath.c_str()))
-								{
-									break;
-								}
-
-								auto change = std::make_unique<NotifyEvent>();
-								change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
-								change->flags = FSW_NOTIFY_MODIFIED;
-								change->path = path;
-
-								queuedEvents.push_back(std::move(change));
-							}
-
-							break;
-						}
-						case FILE_ACTION_RENAMED_OLD_NAME:
-						{
-							if (config->notifyFilters & FSW_NOTIFY_RENAMED)
-							{
-								auto change = std::make_unique<NotifyEvent>();
-								change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
-								change->flags = FSW_NOTIFY_RENAMED;
-								change->lastPath = converter.to_bytes(fileName);
-
-								queuedEvents.push_back(std::move(change));
-							}
-							
-							break;
-						}
-						case FILE_ACTION_RENAMED_NEW_NAME:
-						{
-							if (config->notifyFilters & FSW_NOTIFY_RENAMED)
-							{
-								auto &change = queuedEvents.back();
-								change->path = converter.to_bytes(fileName);
-							}
-							
-							break;
-						}
-					}
-
-					if (!info->NextEntryOffset)
-					{
-						break;
-					}
-
-					p += info->NextEntryOffset;
-				}
-
-				std::lock_guard<std::mutex> lock(m_changeEventsMutex);
-
-				for (auto it = queuedEvents.begin(); it != queuedEvents.end(); it++)
-				{
-					auto &change = *it;
-					if (change->flags & config->notifyFilters)
-					{
-						m_changeEvents.push(std::move(*it));
-					}
-				}
-
-				break;
-			}
-			case WAIT_OBJECT_0 + 1:
-			{
-				goto terminate;
-			}
-			default:
-			{
-				goto terminate;
-			}
+			dwNotifyFilter |= FILE_NOTIFY_CHANGE_FILE_NAME;
+			dwNotifyFilter |= FILE_NOTIFY_CHANGE_DIR_NAME;
 		}
-	}
+		
+		if (config->notifyFilters & FSW_NOTIFY_MODIFIED)
+		{
+			dwNotifyFilter |= FILE_NOTIFY_CHANGE_LAST_WRITE;
+		}
+		
+		data->directory = CreateFileA(
+			config->root_path.c_str(),
+			FILE_LIST_DIRECTORY | GENERIC_READ,
+			FILE_SHARE_READ | FILE_SHARE_WRITE,
+			nullptr,
+			OPEN_EXISTING,
+			FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+			nullptr);
+
+		if (data->directory == INVALID_HANDLE_VALUE)
+		{
+			goto terminate;
+		}
 #elif defined KE_LINUX
-	data->fd = inotify_init1(IN_NONBLOCK);
-	if (data->fd == -1)
-	{
-		goto terminate;
-	}
-
-	data->mask = 0;
-
-	if (config->includeSubdirectories)
-	{
-		data->mask |= (IN_CREATE | IN_MOVE);
-	}
-	else
-	{
-		if (config->notifyFilters & FSW_NOTIFY_CREATED)
+		data->fd = inotify_init1(IN_NONBLOCK);
+		if (data->fd == -1)
 		{
-			data->mask |= IN_CREATE;
+			goto terminate;
 		}
 
-		if (config->notifyFilters & FSW_NOTIFY_RENAMED)
+		data->mask = 0;
+
+		if (config->includeSubdirectories)
 		{
-			data->mask |= IN_MOVE;
+			data->mask |= (IN_CREATE | IN_MOVE);
 		}
-	}
-
-	if (config->notifyFilters & FSW_NOTIFY_DELETED)
-	{
-		data->mask |= IN_DELETE;
-	}
-
-	if (config->notifyFilters & FSW_NOTIFY_MODIFIED)
-	{
-		data->mask |= IN_CLOSE_WRITE;
-	}
-
-	data->root_wd = data->AddWatch(config, "", IN_DELETE_SELF | IN_MOVE_SELF);
-	if (data->root_wd == -1)
-	{
-		goto terminate;
-	}
-
-	pollfd fds[2];
-
-	fds[0].fd = data->fd;
-	fds[0].events = POLLIN;
-
-	fds[1].fd = m_threadCancelEventHandle;
-	fds[1].events = POLLIN;
-
-	while (true)
-	{
-		int poll_num = poll(fds, 2, -1);
-
-		if (poll_num > 0)
+		else
 		{
-			if (fds[1].revents & POLLIN)
+			if (config->notifyFilters & FSW_NOTIFY_CREATED)
+			{
+				data->mask |= IN_CREATE;
+			}
+
+			if (config->notifyFilters & FSW_NOTIFY_RENAMED)
+			{
+				data->mask |= IN_MOVE;
+			}
+		}
+
+		if (config->notifyFilters & FSW_NOTIFY_DELETED)
+		{
+			data->mask |= IN_DELETE;
+		}
+
+		if (config->notifyFilters & FSW_NOTIFY_MODIFIED)
+		{
+			data->mask |= IN_CLOSE_WRITE;
+		}
+
+		data->root_wd = data->AddWatch(config, "", IN_DELETE_SELF | IN_MOVE_SELF);
+		if (data->root_wd == -1)
+		{
+			goto terminate;
+		}
+#endif
+
+		didStart = true;
+
+		{
+			std::lock_guard<std::mutex> lock(m_changeEventsMutex);
+
+			auto ev = std::make_unique<NotifyEvent>();
+			ev->type = NotifyEvent::NotifyEventType::START;
+			m_changeEvents.push(std::move(ev));
+		}
+
+#ifdef KE_WINDOWS
+		data->changeEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+
+		HANDLE waitHandles[2];
+		waitHandles[0] = data->changeEvent;
+		waitHandles[1] = m_threadCancelEventHandle;
+
+		OVERLAPPED overlapped;
+		ZeroMemory(&overlapped, sizeof overlapped);
+		overlapped.hEvent = data->changeEvent;
+
+		DWORD bytesReturned;
+
+		while (true)
+		{
+			if (!ReadDirectoryChangesW(data->directory,
+				buffer.get(),
+				config->bufferSize,
+				config->includeSubdirectories,
+				dwNotifyFilter,
+				&bytesReturned,
+				&overlapped,
+				nullptr))
 			{
 				goto terminate;
 			}
 
-			if (fds[0].revents & POLLIN)
+			switch (WaitForMultipleObjects(2, waitHandles, FALSE, INFINITE))
 			{
-				std::vector<std::unique_ptr<NotifyEvent>> queuedEvents;
-
-				for (;;)
+				case WAIT_OBJECT_0:
 				{
-					ssize_t len = read(data->fd, buffer.get(), config->bufferSize);
-					
-					if (len == -1 && errno != EAGAIN) 
+					DWORD dwBytes = 0;
+					if (!GetOverlappedResult(data->directory, &overlapped, &dwBytes, TRUE))
 					{
 						goto terminate;
 					}
 
-					if (len <= 0)
+					ResetEvent(data->changeEvent);
+
+					if (dwBytes == 0)
 					{
 						break;
 					}
 
-					const inotify_event* event;
-					for (char* p = buffer.get(); p < buffer.get() + len; p += sizeof(inotify_event) + event->len)
+					std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+					std::vector<std::unique_ptr<NotifyEvent>> queuedEvents;
+
+					char *p = buffer.get();
+					for (;;)
 					{
-						event = (const inotify_event*)p;
+						FILE_NOTIFY_INFORMATION* info = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(p);
 
-						if (event->mask & (IN_MOVE_SELF | IN_DELETE_SELF | IN_IGNORED))
+						std::wstring fileName(info->FileName, info->FileNameLength / sizeof(wchar_t));
+
+						switch (info->Action)
 						{
-							auto it = data->wd.find(event->wd);
-							if (it != data->wd.end())
+							case FILE_ACTION_ADDED:
 							{
-								if (event->mask & IN_MOVE_SELF)
+								if (config->notifyFilters & (FSW_NOTIFY_CREATED | FSW_NOTIFY_RENAMED))
 								{
-									inotify_rm_watch(data->fd, event->wd);
+									std::string path = converter.to_bytes(fileName);
+
+									if (!queuedEvents.empty())
+									{
+										bool isRenameEvent = false;
+
+										for (auto it = queuedEvents.rbegin(); it != queuedEvents.rend(); it++)
+										{
+											auto &change = *it;
+
+											if (change->flags == FSW_NOTIFY_DELETED)
+											{
+												std::string me = GetFileNameFromPath(path);
+												std::string them = GetFileNameFromPath(change->path);
+
+												if (me == them)
+												{
+													change->flags = FSW_NOTIFY_RENAMED;
+													change->lastPath = change->path;
+													change->path = path;
+
+													isRenameEvent = true;
+													break;
+												}
+											}
+										}
+
+										if (isRenameEvent)
+										{
+											break;
+										}
+									}
+
+									auto change = std::make_unique<NotifyEvent>();
+									change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
+									change->flags = FSW_NOTIFY_CREATED;
+									change->path = path;
+
+									queuedEvents.push_back(std::move(change));
 								}
 
-								data->wd.erase(it);
+								break;
 							}
+							case FILE_ACTION_REMOVED:
+							{
+								if (config->notifyFilters & (FSW_NOTIFY_DELETED | FSW_NOTIFY_RENAMED))
+								{
+									auto change = std::make_unique<NotifyEvent>();
+									change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
+									change->flags = FSW_NOTIFY_DELETED;
+									change->path = converter.to_bytes(fileName);
 
-							if (event->wd == data->root_wd)
-							{
-								goto terminate;
+									queuedEvents.push_back(std::move(change));
+								}
+								
+								break;
 							}
-							else
+							case FILE_ACTION_MODIFIED:
 							{
-								continue;
+								if (config->notifyFilters & FSW_NOTIFY_MODIFIED)
+								{
+									std::string path = converter.to_bytes(fileName);
+
+									std::string absPath(config->root_path);
+									absPath.append(path);
+
+									if (ke::file::IsDirectory(absPath.c_str()))
+									{
+										break;
+									}
+
+									auto change = std::make_unique<NotifyEvent>();
+									change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
+									change->flags = FSW_NOTIFY_MODIFIED;
+									change->path = path;
+
+									queuedEvents.push_back(std::move(change));
+								}
+
+								break;
+							}
+							case FILE_ACTION_RENAMED_OLD_NAME:
+							{
+								if (config->notifyFilters & FSW_NOTIFY_RENAMED)
+								{
+									auto change = std::make_unique<NotifyEvent>();
+									change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
+									change->flags = FSW_NOTIFY_RENAMED;
+									change->lastPath = converter.to_bytes(fileName);
+
+									queuedEvents.push_back(std::move(change));
+								}
+								
+								break;
+							}
+							case FILE_ACTION_RENAMED_NEW_NAME:
+							{
+								if (config->notifyFilters & FSW_NOTIFY_RENAMED)
+								{
+									auto &change = queuedEvents.back();
+									change->path = converter.to_bytes(fileName);
+								}
+								
+								break;
 							}
 						}
 
-						std::string &baseRelPath = data->wd.at(event->wd);
-
-						if (event->mask & (IN_CREATE | IN_MOVED_TO))
+						if (!info->NextEntryOffset)
 						{
-							if (config->includeSubdirectories && (event->mask & IN_ISDIR))
+							break;
+						}
+
+						p += info->NextEntryOffset;
+					}
+
+					std::lock_guard<std::mutex> lock(m_changeEventsMutex);
+
+					for (auto it = queuedEvents.begin(); it != queuedEvents.end(); it++)
+					{
+						auto &change = *it;
+						if (change->flags & config->notifyFilters)
+						{
+							m_changeEvents.push(std::move(*it));
+						}
+					}
+
+					break;
+				}
+				case WAIT_OBJECT_0 + 1:
+				{
+					isRunning = false;
+					goto terminate;
+				}
+				default:
+				{
+					goto terminate;
+				}
+			}
+		}
+#elif defined KE_LINUX
+		pollfd fds[2];
+
+		fds[0].fd = data->fd;
+		fds[0].events = POLLIN;
+
+		fds[1].fd = m_threadCancelEventHandle;
+		fds[1].events = POLLIN;
+
+		while (true)
+		{
+			if (poll(fds, 2, -1) > 0)
+			{
+				if (fds[1].revents & POLLIN)
+				{
+					isRunning = false;
+					goto terminate;
+				}
+
+				if (fds[0].revents & POLLIN)
+				{
+					std::vector<std::unique_ptr<NotifyEvent>> queuedEvents;
+
+					for (;;)
+					{
+						ssize_t len = read(data->fd, buffer.get(), config->bufferSize);
+						
+						if (len == -1 && errno != EAGAIN) 
+						{
+							goto terminate;
+						}
+
+						if (len <= 0)
+						{
+							break;
+						}
+
+						const inotify_event* event;
+						for (char* p = buffer.get(); p < buffer.get() + len; p += sizeof(inotify_event) + event->len)
+						{
+							event = (const inotify_event*)p;
+
+							if (event->mask & (IN_MOVE_SELF | IN_DELETE_SELF | IN_IGNORED))
 							{
-								std::string relPath(baseRelPath);
-								relPath.append(event->name);
-								relPath.push_back('/');
-
-								data->AddWatch(config, relPath);
-							}
-
-							if (event->mask & IN_MOVED_TO)
-							{
-								bool foundRenamedEvent = false;
-
-								for (auto it = queuedEvents.rbegin(); it != queuedEvents.rend(); it++)
+								auto it = data->wd.find(event->wd);
+								if (it != data->wd.end())
 								{
-									auto &change = *it;
-									if (change->cookie == event->cookie)
+									if (event->mask & IN_MOVE_SELF)
 									{
-										change->flags = FSW_NOTIFY_RENAMED;
-										change->cookie = 0;
-										change->lastPath = change->path;
-										change->path = baseRelPath;
-										change->path.append(event->name);
-
-										foundRenamedEvent = true;
-										break;
+										inotify_rm_watch(data->fd, event->wd);
 									}
+
+									data->wd.erase(it);
 								}
 
-								if (foundRenamedEvent)
+								if (event->wd == data->root_wd)
+								{
+									goto terminate;
+								}
+								else
 								{
 									continue;
 								}
 							}
 
-							std::unique_ptr<NotifyEvent> change = std::make_unique<NotifyEvent>();
-							change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
-							change->flags = FSW_NOTIFY_CREATED;
-							change->cookie = event->cookie;
-							change->path = baseRelPath;
-							change->path.append(event->name);
+							std::string &baseRelPath = data->wd.at(event->wd);
 
-							queuedEvents.push_back(std::move(change));
-						}
-
-						if (event->mask & (IN_DELETE | IN_MOVED_FROM))
-						{
-							if (event->mask & IN_MOVED_FROM)
+							if (event->mask & (IN_CREATE | IN_MOVED_TO))
 							{
-								bool foundRenamedEvent = false;
-
-								for (auto it = queuedEvents.rbegin(); it != queuedEvents.rend(); it++)
+								if (config->includeSubdirectories && (event->mask & IN_ISDIR))
 								{
-									auto &change = *it;
-									if (change->cookie == event->cookie)
-									{
-										change->flags = FSW_NOTIFY_RENAMED;
-										change->cookie = 0;
-										change->lastPath = change->path;
-										change->path = baseRelPath;
-										change->path.append(event->name);
+									std::string relPath(baseRelPath);
+									relPath.append(event->name);
+									relPath.push_back('/');
 
-										foundRenamedEvent = true;
-										break;
+									data->AddWatch(config, relPath);
+								}
+
+								if (event->mask & IN_MOVED_TO)
+								{
+									bool foundRenamedEvent = false;
+
+									for (auto it = queuedEvents.rbegin(); it != queuedEvents.rend(); it++)
+									{
+										auto &change = *it;
+										if (change->cookie == event->cookie)
+										{
+											change->flags = FSW_NOTIFY_RENAMED;
+											change->cookie = 0;
+											change->lastPath = change->path;
+											change->path = baseRelPath;
+											change->path.append(event->name);
+
+											foundRenamedEvent = true;
+											break;
+										}
+									}
+
+									if (foundRenamedEvent)
+									{
+										continue;
 									}
 								}
 
-								if (foundRenamedEvent)
-								{
-									continue;
-								}
-							}
-
-							std::unique_ptr<NotifyEvent> change = std::make_unique<NotifyEvent>();
-							change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
-							change->flags = FSW_NOTIFY_DELETED;
-							change->cookie = event->cookie;
-							change->path = baseRelPath;
-							change->path.append(event->name);
-
-							queuedEvents.push_back(std::move(change));
-						}
-
-						if (event->mask & IN_CLOSE_WRITE)
-						{
-							if (config->notifyFilters & FSW_NOTIFY_MODIFIED)
-							{
 								std::unique_ptr<NotifyEvent> change = std::make_unique<NotifyEvent>();
 								change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
-								change->flags = FSW_NOTIFY_MODIFIED;
+								change->flags = FSW_NOTIFY_CREATED;
 								change->cookie = event->cookie;
 								change->path = baseRelPath;
 								change->path.append(event->name);
 
 								queuedEvents.push_back(std::move(change));
 							}
+
+							if (event->mask & (IN_DELETE | IN_MOVED_FROM))
+							{
+								if (event->mask & IN_MOVED_FROM)
+								{
+									bool foundRenamedEvent = false;
+
+									for (auto it = queuedEvents.rbegin(); it != queuedEvents.rend(); it++)
+									{
+										auto &change = *it;
+										if (change->cookie == event->cookie)
+										{
+											change->flags = FSW_NOTIFY_RENAMED;
+											change->cookie = 0;
+											change->lastPath = change->path;
+											change->path = baseRelPath;
+											change->path.append(event->name);
+
+											foundRenamedEvent = true;
+											break;
+										}
+									}
+
+									if (foundRenamedEvent)
+									{
+										continue;
+									}
+								}
+
+								std::unique_ptr<NotifyEvent> change = std::make_unique<NotifyEvent>();
+								change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
+								change->flags = FSW_NOTIFY_DELETED;
+								change->cookie = event->cookie;
+								change->path = baseRelPath;
+								change->path.append(event->name);
+
+								queuedEvents.push_back(std::move(change));
+							}
+
+							if (event->mask & IN_CLOSE_WRITE)
+							{
+								if (config->notifyFilters & FSW_NOTIFY_MODIFIED)
+								{
+									std::unique_ptr<NotifyEvent> change = std::make_unique<NotifyEvent>();
+									change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
+									change->flags = FSW_NOTIFY_MODIFIED;
+									change->cookie = event->cookie;
+									change->path = baseRelPath;
+									change->path.append(event->name);
+
+									queuedEvents.push_back(std::move(change));
+								}
+							}
 						}
 					}
-				}
 
-				std::lock_guard<std::mutex> lock(m_changeEventsMutex);
+					std::lock_guard<std::mutex> lock(m_changeEventsMutex);
 
-				for (auto it = queuedEvents.begin(); it != queuedEvents.end(); it++)
-				{
-					auto &change = *it;
-					if (change->flags & config->notifyFilters)
+					for (auto it = queuedEvents.begin(); it != queuedEvents.end(); it++)
 					{
-						m_changeEvents.push(std::move(*it));
+						auto &change = *it;
+						if (change->flags & config->notifyFilters)
+						{
+							m_changeEvents.push(std::move(*it));
+						}
 					}
 				}
 			}
 		}
-	}
 #endif
 
 terminate:
-	SetThreadRunning(false);
+		SetThreadRunning(false);
 
-	{
-		std::lock_guard<std::mutex> lock(m_changeEventsMutex);
+		if (didStart)
+		{
+			std::lock_guard<std::mutex> lock(m_changeEventsMutex);
 
-		auto ev = std::make_unique<NotifyEvent>();
-		ev->type = NotifyEvent::NotifyEventType::EXIT;
-		m_changeEvents.push(std::move(ev));
+			auto ev = std::make_unique<NotifyEvent>();
+			ev->type = NotifyEvent::NotifyEventType::EXIT;
+			m_changeEvents.push(std::move(ev));
+		}
+
+		if (isRunning)
+		{
+#ifdef KE_WINDOWS
+			switch (WaitForSingleObject(m_threadCancelEventHandle, config->retryInterval))
+			{
+				case WAIT_OBJECT_0:
+				{
+					isRunning = false;
+					break;
+				}
+			}
+#elif defined KE_LINUX
+			pollfd retry_fds[1];
+
+			retry_fds[0].fd = m_threadCancelEventHandle;
+			retry_fds[0].events = POLLIN;
+
+			if (poll(retry_fds, 1, config->retryInterval) > 0)
+			{
+				if (retry_fds[0].revents & POLLIN)
+				{
+					isRunning = false;
+				}
+			}
+#endif
+		}
 	}
 }
 
@@ -1068,6 +1109,38 @@ cell_t Native_FileSystemWatcher_NotifyFilterSet(SourcePawn::IPluginContext *cont
 	return 0;
 }
 
+cell_t Native_FileSystemWatcher_RetryIntervalGet(SourcePawn::IPluginContext *context, const cell_t *params)
+{
+	FileSystemWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+	if (!watcher)
+	{
+		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
+		return 0;
+	}
+
+	return watcher->m_retryInterval;
+}
+
+cell_t Native_FileSystemWatcher_RetryIntervalSet(SourcePawn::IPluginContext *context, const cell_t *params)
+{
+	FileSystemWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+	if (!watcher)
+	{
+		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
+		return 0;
+	}
+
+	int retryInterval = params[2];
+	if (retryInterval < 0)
+	{
+		context->ReportError("RetryInterval cannot be negative");
+		return 0;
+	}
+
+	watcher->m_retryInterval = retryInterval;
+	return 0;
+}
+
 cell_t Native_FileSystemWatcher_InternalBufferSizeGet(SourcePawn::IPluginContext *context, const cell_t *params)
 {
 	FileSystemWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
@@ -1274,6 +1347,8 @@ sp_nativeinfo_s FileSystemWatcherManager::m_Natives[] =
 	{"FileSystemWatcher.IncludeSubdirectories.set", Native_FileSystemWatcher_IncludeSubdirectoriesSet},
 	{"FileSystemWatcher.NotifyFilter.get", Native_FileSystemWatcher_NotifyFilterGet},
 	{"FileSystemWatcher.NotifyFilter.set", Native_FileSystemWatcher_NotifyFilterSet},
+	{"FileSystemWatcher.RetryInterval.get", Native_FileSystemWatcher_RetryIntervalGet},
+	{"FileSystemWatcher.RetryInterval.set", Native_FileSystemWatcher_RetryIntervalSet},
 	{"FileSystemWatcher.InternalBufferSize.get", Native_FileSystemWatcher_InternalBufferSizeGet},
 	{"FileSystemWatcher.InternalBufferSize.set", Native_FileSystemWatcher_InternalBufferSizeSet},
 	{"FileSystemWatcher.OnStarted.set", Native_FileSystemWatcher_OnStartedSet},
