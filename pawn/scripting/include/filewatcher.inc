@@ -54,7 +54,18 @@ methodmap FileSystemWatcher < Handle
 	 * Upon setting this to true, the watcher will begin monitoring its directory.
 	 * However, events will not be sent to plugins until the first `OnGameFrame()` is
 	 * called, so consider only watching when events can be sent such as on/after
-	 * `OnMapStart()` or `OnConfigsExecuted()`.
+	 * `OnMapStart()` or `OnConfigsExecuted()`. The `OnStarted` and `OnStopped` callbacks
+	 * can be used to determine if the watcher is actually receiving events or not.
+	 * 
+	 * It is not always guaranteed that the watcher will be receiving file change events
+	 * especially if the watched directory is deleted, renamed, or does not exist.
+	 * In this scenario, the watcher will retry watching the directory every `RetryInterval` 
+	 * milliseconds until it succeeds.
+	 * 
+	 * Once you start watching a directory, you are discouraged from moving, renaming, 
+	 * or deleting the directory in any way. In Windows this is not allowed, and in 
+	 * Linux doing so will cause the watcher to stop receiving events and continually
+	 * retry until it is successful.
 	 */
 	property bool IsWatching
 	{
@@ -95,7 +106,7 @@ methodmap FileSystemWatcher < Handle
 	 * The size (in bytes) of the internal buffer. The size should be an interval
 	 * of 4KB.
 	 * 
-	 * Sometimes events can be missed which can happen with directories that arevery active. 
+	 * Sometimes events can be missed which can happen with directories that are very active. 
 	 * You may consider increasing the buffer size if the default size (8KB) isn't enough, 
 	 * but do not exceed 64KB.
 	 */
@@ -117,7 +128,7 @@ methodmap FileSystemWatcher < Handle
 	 * The callback for when the watcher stops receiving file system change events.
 	 * 
 	 * This can be triggered if the watcher is explicitly ordered to stop watching,
-	 * or the watched directory is deleted/moved.
+	 * or the watched directory is renamed/moved/deleted.
 	 */
 	property FileSystemWatcherOnStopped OnStopped
 	{
@@ -159,7 +170,7 @@ methodmap FileSystemWatcher < Handle
 	 * name of the file will result in a Rename action.
 	 * 
 	 * For Windows: Moving a file from one directory to another is seen as two 
-	 * actions, Delete (from old directory) and Create (in new directory).
+	 * actions: Delete (from old directory) and Create (in new directory).
 	 * 
 	 * For Linux: Moving a file from one *watched* directory to another watched 
 	 * directory is seen as a Rename action.
@@ -174,21 +185,15 @@ methodmap FileSystemWatcher < Handle
 	 * notifications and raises events when a directory, or file in a directory, 
 	 * changes.
 	 * 
-	 * It is not always guaranteed that the watcher will be receiving file change events
-	 * especially if the watched directory is deleted, renamed, or does not exist.
-	 * In this scenario, the watcher will retry watching the directory every `RetryInterval` 
-	 * milliseconds until it succeeds. The `OnStarted` and `OnStopped` callbacks
-	 * are invoked specifically for this scenario.
-	 * 
 	 * @param path    Path to directory. This path is relative to the game directory.
 	 */
 	public native FileSystemWatcher(const char[] path = "");
 
 	/**
 	 * Retrieves the path of the watched directory, relative to the game directory.
-	 * This will always be trailed with the OS's preferred path separator 
-	 * ("\\" for Windows, "/" for Linux).
 	 * 
+	 * @note                This will always be trailed with the OS's preferred path separator 
+	 *                      ("\\" for Windows, "/" for Linux).
 	 * @param buffer        Buffer to store the path.
 	 * @param bufferSize    Size of buffer.
 	 * @return              Number of bytes written.
