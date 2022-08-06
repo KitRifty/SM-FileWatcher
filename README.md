@@ -15,6 +15,7 @@ This is inspired from [.NET's FileSystemWatcher](https://docs.microsoft.com/en-u
 - [API Reference](#api-reference)
 - [Usage](#usage)
 	- [Watching a directory](#watching-a-directory)
+	- [Watching a single file](#watching-a-single-file)
 	- [Stop watching a directory](#stop-watching-a-directory)
 - [License](#license)
 
@@ -28,15 +29,19 @@ See the [include file](./pawn/scripting/include/filewatcher.inc) for more inform
 
 # Usage
 
-## Watching a directory
-
-This example shows how to watch the game's `cfg` directory for changes.
+Assume the following code is preceded by this snippet:
 
 ```sourcepawn
 #include <filewatcher>
 
 FileSystemWatcher g_fsw;
+```
 
+## Watching a directory
+
+This example shows how to watch the game's `cfg` directory for changes.
+
+```sourcepawn
 public void OnPluginStart()
 {
 	g_fsw = new FileSystemWatcher("cfg");
@@ -66,6 +71,41 @@ static void OnStopped(FileSystemWatcher fsw)
 
 	PrintToServer("Stopped watching the %s folder for changes.", path);
 }
+```
+
+## Watching a single file
+
+This example shows how to watch the server's `server.cfg` file for changes and automatically execute it.
+
+```sourcepawn
+public void OnPluginStart()
+{
+	g_fsw = new FileSystemWatcher("cfg");
+	g_fsw.NotifyFilter = FSW_NOTIFY_MODIFIED | FSW_NOTIFY_RENAMED;
+	g_fsw.OnModified = OnModified;
+}
+
+public void OnConfigsExecuted()
+{
+	g_fsw.IsWatching = true;
+}
+
+static void OnModified(FileSystemWatcher fsw, const char[] path)
+{
+	if (strcmp(path, "server.cfg", false) == 0)
+	{
+		ServerCommand("exec server.cfg");
+	}
+}
+
+static void OnRenamed(FileSystemWatcher fsw, const char[] oldPath, const char[] newPath)
+{
+	if (strcmp(newPath, "server.cfg", false) == 0)
+	{
+		ServerCommand("exec server.cfg");
+	}
+}
+
 ```
 
 ## Stop watching a directory
