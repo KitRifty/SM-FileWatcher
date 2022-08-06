@@ -204,7 +204,7 @@ methodmap FileSystemWatcher < Handle
 /**
  * Do not edit below this line!
  */
-public Extension __ext_sdkhooks =
+public Extension __ext_filewatcher =
 {
 	name = "FileWatcher",
 	file = "filewatcher.ext",
@@ -219,3 +219,27 @@ public Extension __ext_sdkhooks =
 	required = 0,
 #endif
 };
+
+#if !defined REQUIRE_EXTENSIONS
+public __ext_filewatcher_SetNTVOptional()
+{
+	MarkNativeAsOptional("FileSystemWatcher.IsWatching.get");
+	MarkNativeAsOptional("FileSystemWatcher.IsWatching.set");
+	MarkNativeAsOptional("FileSystemWatcher.IncludeSubdirectories.get");
+	MarkNativeAsOptional("FileSystemWatcher.IncludeSubdirectories.set");
+	MarkNativeAsOptional("FileSystemWatcher.NotifyFilter.get");
+	MarkNativeAsOptional("FileSystemWatcher.NotifyFilter.set");
+	MarkNativeAsOptional("FileSystemWatcher.RetryInterval.get");
+	MarkNativeAsOptional("FileSystemWatcher.RetryInterval.set");
+	MarkNativeAsOptional("FileSystemWatcher.InternalBufferSize.get");
+	MarkNativeAsOptional("FileSystemWatcher.InternalBufferSize.set");
+	MarkNativeAsOptional("FileSystemWatcher.OnStarted.set");
+	MarkNativeAsOptional("FileSystemWatcher.OnStopped.set");
+	MarkNativeAsOptional("FileSystemWatcher.OnCreated.set");
+	MarkNativeAsOptional("FileSystemWatcher.OnDeleted.set");
+	MarkNativeAsOptional("FileSystemWatcher.OnModified.set");
+	MarkNativeAsOptional("FileSystemWatcher.OnRenamed.set");
+	MarkNativeAsOptional("FileSystemWatcher.FileSystemWatcher");
+	MarkNativeAsOptional("FileSystemWatcher.GetPath");
+}
+#endif
