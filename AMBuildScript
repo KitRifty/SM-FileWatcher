@@ -39,7 +39,6 @@ class ExtensionConfig(object):
     self.generated_headers = None
     self.mms_root = None
     self.sm_root = None
-    self.versionlib = None
     self.all_targets = []
     self.target_archs = set()
 
@@ -152,10 +151,6 @@ class ExtensionConfig(object):
       self.configure_windows(cxx)
 
     # Finish up.
-    cxx.defines += [
-      'SMEXT_USE_VERSIONLIB',
-    ]
-
     cxx.includes += [
       os.path.join(self.sm_root, 'public'),
     ]
@@ -164,7 +159,6 @@ class ExtensionConfig(object):
       cxx.defines += ['SMEXT_GENERATED_BUILD']
       cxx.includes += [
         os.path.join(builder.buildPath, 'includes'),
-        os.path.join(builder.sourcePath, 'versionlib'),
       ]
 
   def configure_gcc(self, cxx):
@@ -308,24 +302,13 @@ class ExtensionConfig(object):
     cxx.defines += ['WIN32', '_WINDOWS']
 	
   def AddVersioning(self, binary):
-    if binary.compiler.target.platform == 'windows':
-      '''
-      binary.sources += ['version.rc']
-      binary.compiler.rcdefines += [
-        'BINARY_NAME="{0}"'.format(binary.outputFile),
-        'RC_COMPILE',
-      ]
-      '''
-      if self.use_auto_versioning():
-        binary.compiler.rcdefines += ['SM_GENERATED_BUILD']
-    elif binary.compiler.target.platform == 'mac':
+    if binary.compiler.target.platform == 'mac':
       if binary.type == 'library':
         binary.compiler.postlink += [
           '-compatibility_version', '1.0.0',
           '-current_version', self.productVersion
         ]
     if self.use_auto_versioning():
-      binary.compiler.linkflags += [self.versionlib[binary.compiler.target.arch]]
       binary.compiler.sourcedeps += self.generated_headers
     return binary
 
@@ -418,19 +401,11 @@ if Extension.use_auto_versioning():
     'tools/Versioning',
     { 'Extension': Extension }
   )
-  Extension.versionlib = builder.Build(
-    'versionlib/AMBuilder',
-    { 'Extension': Extension }
-  )
 
 # Add additional buildscripts here
 BuildScripts = [
-  'AMBuilder',
+  'extension/AMBuilder',
+  'PackageScript',
 ]
-
-if builder.backend == 'amb2':
-  BuildScripts += [
-    'PackageScript',
-  ]
 
 builder.Build(BuildScripts, { 'Extension': Extension })
