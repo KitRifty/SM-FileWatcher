@@ -46,7 +46,10 @@ public void OnPluginStart()
 {
 	g_fsw = new FileSystemWatcher("cfg");
 	g_fsw.IncludeSubdirectories = true;
-	g_fsw.NotifyFilter = FSW_NOTIFY_CREATED | FSW_NOTIFY_DELETED | FSW_NOTIFY_MODIFIED | FSW_NOTIFY_RENAMED;
+	g_fsw.NotifyFilter = FSW_NOTIFY_CREATED |
+		FSW_NOTIFY_DELETED |
+		FSW_NOTIFY_MODIFIED |
+		FSW_NOTIFY_RENAMED;
 	g_fsw.OnStarted = OnStarted;
 	g_fsw.OnStopped = OnStopped;
 }
@@ -81,7 +84,9 @@ This example shows how to watch the server's `server.cfg` file for changes and a
 public void OnPluginStart()
 {
 	g_fsw = new FileSystemWatcher("cfg");
-	g_fsw.NotifyFilter = FSW_NOTIFY_CREATED | FSW_NOTIFY_MODIFIED | FSW_NOTIFY_RENAMED;
+	g_fsw.NotifyFilter = FSW_NOTIFY_CREATED |
+		FSW_NOTIFY_MODIFIED |
+		FSW_NOTIFY_RENAMED;
 	g_fsw.OnCreated = OnCreated;
 	g_fsw.OnModified = OnModified;
 	g_fsw.OnRenamed = OnRenamed;
