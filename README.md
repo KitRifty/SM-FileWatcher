@@ -81,7 +81,8 @@ This example shows how to watch the server's `server.cfg` file for changes and a
 public void OnPluginStart()
 {
 	g_fsw = new FileSystemWatcher("cfg");
-	g_fsw.NotifyFilter = FSW_NOTIFY_MODIFIED | FSW_NOTIFY_RENAMED;
+	g_fsw.NotifyFilter = FSW_NOTIFY_CREATED | FSW_NOTIFY_MODIFIED | FSW_NOTIFY_RENAMED;
+	g_fsw.OnCreated = OnCreated;
 	g_fsw.OnModified = OnModified;
 	g_fsw.OnRenamed = OnRenamed;
 }
@@ -89,6 +90,14 @@ public void OnPluginStart()
 public void OnConfigsExecuted()
 {
 	g_fsw.IsWatching = true;
+}
+
+static void OnCreated(FileSystemWatcher fsw, const char[] path)
+{
+	if (strcmp(path, "server.cfg", false) == 0)
+	{
+		ServerCommand("exec server.cfg");
+	}
 }
 
 static void OnModified(FileSystemWatcher fsw, const char[] path)
