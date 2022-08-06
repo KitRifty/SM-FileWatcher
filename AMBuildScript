@@ -37,7 +37,6 @@ class ExtensionConfig(object):
     self.binaries = []
     self.extensions = []
     self.generated_headers = None
-    self.mms_root = None
     self.sm_root = None
     self.all_targets = []
     self.target_archs = set()
@@ -100,19 +99,6 @@ class ExtensionConfig(object):
     if not self.sm_root or not os.path.isdir(self.sm_root):
       raise Exception('Could not find a source copy of SourceMod')
     self.sm_root = Normalize(self.sm_root)
-
-    if builder.options.mms_path:
-      self.mms_root = builder.options.mms_path
-    else:
-      self.mms_root = ResolveEnvPath('MMSOURCE110', 'mmsource-1.10')
-      if not self.mms_root:
-        self.mms_root = ResolveEnvPath('MMSOURCE', 'metamod-source')
-      if not self.mms_root:
-        self.mms_root = ResolveEnvPath('MMSOURCE_DEV', 'mmsource-central')
-
-    if not self.mms_root or not os.path.isdir(self.mms_root):
-      raise Exception('Could not find a source copy of Metamod:Source')
-    self.mms_root = Normalize(self.mms_root)
 
   def configure(self):
     if not set(self.target_archs).issubset(['x86', 'x86_64']):
@@ -355,13 +341,6 @@ class ExtensionConfig(object):
 
   def ConfigureForHL2(self, binary):
     compiler = binary.compiler
-
-    mms_path = os.path.join(self.mms_root, 'core')
-
-    compiler.cxxincludes += [
-      os.path.join(mms_path),
-      os.path.join(mms_path, 'sourcehook'),
-    ]
 
     compiler.defines += ['META_NO_HL2SDK']
 
