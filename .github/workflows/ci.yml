@@ -78,14 +78,14 @@ jobs:
           ambuild
       
       - name: Upload artifact
-        if: github.event_name == 'push' && (startsWith(matrix.os, 'ubuntu-18.04') || startsWith(matrix.os, 'windows-2019'))
+        if: github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && (startsWith(matrix.os, 'ubuntu-18.04') || startsWith(matrix.os, 'windows-2019'))
         uses: actions/upload-artifact@v1
         with:
           name: ${{ runner.os }}
           path: extension/build/package
       
       - name: Upload artifact
-        if: github.event_name == 'push' && strategy.job-index == 0
+        if: github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && strategy.job-index == 0
         uses: actions/upload-artifact@v1
         with:
           name: versioning
@@ -93,7 +93,7 @@ jobs:
 
   release:
     name: Release
-    if: github.event_name == 'push'
+    if: github.event_name == 'workflow_dispatch' && github.ref_name == 'main'
     needs: build
     runs-on: ubuntu-latest
 
