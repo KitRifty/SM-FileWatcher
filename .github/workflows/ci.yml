@@ -18,8 +18,6 @@ jobs:
         include:
           - os: ubuntu-18.04
             target-archs: x86
-            cc: clang-8
-            cxx: clang++-8
             
           - os: windows-2019
             target-archs: x86
@@ -46,12 +44,6 @@ jobs:
           sudo apt update
           sudo apt install -yq --no-install-recommends g++-multilib
       
-      - name: Select compiler
-        if: startsWith(runner.os, 'Linux')
-        run: |
-          echo "CC=${{ matrix.cc }}" >> $GITHUB_ENV
-          echo "CXX=${{ matrix.cxx }}" >> $GITHUB_ENV
-    
       - uses: actions/checkout@v3
         name: Repository checkout
         with:
