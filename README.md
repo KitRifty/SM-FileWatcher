@@ -1,7 +1,9 @@
 <div align="center">
 <h1>FileWatcher</h1>
 
-[![contributions-welcome](https://user-images.githubusercontent.com/6830124/160218475-2bf2fef4-38cc-42d2-8f04-b509973ad819.svg)](#%EF%B8%8Fcontributions)
+![](https://github.com/KitRifty/SM-FileWatcher/actions/workflows/ci.yml/badge.svg?branch=main)
+![PR's Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat)
+[![](https://img.shields.io/github/license/KitRifty/SM-FileWatcher)](https://opensource.org/licenses/)
 
 </div>
 
