@@ -83,6 +83,7 @@ public void OnPluginStart()
 	g_fsw = new FileSystemWatcher("cfg");
 	g_fsw.NotifyFilter = FSW_NOTIFY_MODIFIED | FSW_NOTIFY_RENAMED;
 	g_fsw.OnModified = OnModified;
+	g_fsw.OnRenamed = OnRenamed;
 }
 
 public void OnConfigsExecuted()
