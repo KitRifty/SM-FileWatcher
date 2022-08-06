@@ -42,7 +42,10 @@ class ExtensionConfig(object):
     self.all_targets = []
     self.target_archs = set()
 
-    target_archs = ['x86']
+    if builder.options.targets:
+      target_archs = builder.options.targets.split(',')
+    else:
+      target_archs = ['x86']
     
     for arch in target_archs:
       try:
