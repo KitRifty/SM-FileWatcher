@@ -36,7 +36,7 @@
  */
 
 /* Basic information exposed publicly */
-#define SMEXT_CONF_NAME			"FileWatcher Extension"
+#define SMEXT_CONF_NAME			"FileWatcher"
 #define SMEXT_CONF_DESCRIPTION	"Allows plugins to watch files/directory trees for changes."
 #ifndef GIT_ACTION_BUILD
 #define SMEXT_CONF_VERSION		"Manual Build"

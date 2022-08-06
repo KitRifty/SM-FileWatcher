@@ -448,18 +448,17 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadConfig> config)
 		ZeroMemory(&overlapped, sizeof overlapped);
 		overlapped.hEvent = data->changeEvent;
 
-		DWORD bytesReturned;
-
 		while (true)
 		{
-			if (!ReadDirectoryChangesW(data->directory,
+			if (!ReadDirectoryChangesExW(data->directory,
 				buffer.get(),
 				config->bufferSize,
 				config->includeSubdirectories,
 				dwNotifyFilter,
-				&bytesReturned,
+				nullptr,
 				&overlapped,
-				nullptr))
+				nullptr,
+				ReadDirectoryNotifyExtendedInformation))
 			{
 				goto terminate;
 			}
@@ -487,7 +486,7 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadConfig> config)
 					char *p = buffer.get();
 					for (;;)
 					{
-						FILE_NOTIFY_INFORMATION* info = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(p);
+						FILE_NOTIFY_EXTENDED_INFORMATION* info = reinterpret_cast<FILE_NOTIFY_EXTENDED_INFORMATION*>(p);
 
 						std::wstring fileName(info->FileName, info->FileNameLength / sizeof(wchar_t));
 
@@ -558,15 +557,15 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadConfig> config)
 							{
 								if (config->notifyFilters & FSW_NOTIFY_MODIFIED)
 								{
+									if (info->FileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+									{
+										break;
+									}
+
 									std::string path = converter.to_bytes(fileName);
 
 									std::string absPath(config->root_path);
 									absPath.append(path);
-
-									if (ke::file::IsDirectory(absPath.c_str()))
-									{
-										break;
-									}
 
 									auto change = std::make_unique<NotifyEvent>();
 									change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
