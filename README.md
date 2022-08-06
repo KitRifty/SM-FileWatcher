@@ -17,6 +17,9 @@ This is inspired from [.NET's FileSystemWatcher](https://docs.microsoft.com/en-u
 	- [Watching a directory](#watching-a-directory)
 	- [Watching a single file](#watching-a-single-file)
 	- [Stop watching a directory](#stop-watching-a-directory)
+- [Windows vs. Linux](#windows-vs-linux)
+	- [Renaming, moving, or deleting a watched directory](#renaming-moving-or-deleting-a-watched-directory)
+	- [Moving files between subdirectories](#moving-files-between-subdirectories)
 - [License](#license)
 
 # Requirements
@@ -134,6 +137,31 @@ g_fsw.IsWatching = false;
 // good ol' fashioned delete
 delete g_fsw;
 ```
+
+# Windows vs. Linux
+
+To detect changes, [`ReadDirectoryChangesW`](https://docs.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-readdirectorychangesw) is used for Windows, [`inotify`](https://linux.die.net/man/7/inotify) for Linux. Both send out change events similarly for the most part aside for a few differences.
+
+## Renaming, moving, or deleting a watched directory
+
+For Windows, this is not allowed.
+
+For Linux, it is allowed, but the directory will no longer be watched.
+
+In any case, you are discouraged from changing the watched directory itself in any way.
+
+## Moving files between subdirectories
+
+For Windows, moving directories/files between subdirectories under the same watched file tree (`IncludeSubdirectories = true`) is seen as two actions in this order:
+- Delete from old directory
+- Create in new directory
+
+For Linux, this is seen as a single Rename action.
+
+This is intentional behavior, but if you wish to handle these events consistently across platforms, consider handling Rename events as two separate Delete and Create events as both the old and new paths are given in the callback.
+
+> **Note**
+> This behavior difference does not apply when moving files ***in and out*** of a watched tree. As far as the watcher is concerned, they will be seen as Create and Delete actions respectively on both platforms.
 
 # License
 
