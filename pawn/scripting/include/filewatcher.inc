@@ -221,7 +221,7 @@ public Extension __ext_filewatcher =
 };
 
 #if !defined REQUIRE_EXTENSIONS
-public __ext_filewatcher_SetNTVOptional()
+public void __ext_filewatcher_SetNTVOptional()
 {
 	MarkNativeAsOptional("FileSystemWatcher.IsWatching.get");
 	MarkNativeAsOptional("FileSystemWatcher.IsWatching.set");
