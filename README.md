@@ -1,9 +1,11 @@
 <div align="center">
 <h1>FileWatcher</h1>
 
-![](https://github.com/KitRifty/SM-FileWatcher/actions/workflows/ci.yml/badge.svg?branch=main)
-![PR's Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat)
-[![](https://img.shields.io/github/license/KitRifty/SM-FileWatcher)](https://opensource.org/licenses/)
+[![](https://img.shields.io/github/v/release/KitRifty/SM-FileWatcher?style=for-the-badge)](../../releases/latest)
+
+![](https://img.shields.io/github/workflow/status/KitRifty/SM-FileWatcher/CI/main?style=for-the-badge)
+![PR's Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=for-the-badge)
+[![](https://img.shields.io/github/license/KitRifty/SM-FileWatcher?style=for-the-badge)](https://opensource.org/licenses/)
 
 </div>
 
