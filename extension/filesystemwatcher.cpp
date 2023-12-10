@@ -322,8 +322,25 @@ void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadConfig> config)
 				{
 					while ((ent = readdir(dir)) != nullptr)
 					{
-						if (ent->d_type == DT_DIR && ent->d_name[0] != '.')
+						if ((ent->d_type == DT_LNK || ent->d_type == DT_DIR) && ent->d_name[0] != '.')
 						{
+							if (ent->d_type == DT_LNK)
+							{
+								std::string linkPath(absPath);
+								linkPath.append(ent->d_name);
+
+								struct stat targetInfo;
+								if (stat(linkPath.c_str(), &targetInfo) == -1)
+								{
+									continue;
+								}
+
+								if (!S_ISDIR(targetInfo.st_mode))
+								{
+									continue;
+								}
+							}
+
 							std::string dirPath(path);
 							dirPath.append(ent->d_name);
 							dirPath.push_back('/');
