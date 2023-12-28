@@ -7,8 +7,8 @@ from ambuild2 import run
 # Hack to show a decent upgrade message, which wasn't done until 2.2.
 ambuild_version = getattr(run, 'CURRENT_API', '2.1')
 if ambuild_version.startswith('2.1'):
-	sys.stderr.write("AMBuild 2.2 or higher is required; please update\n")
-	sys.exit(1)
+  sys.stderr.write("AMBuild 2.2 or higher is required; please update\n")
+  sys.exit(1)
 
 parser = run.BuildParser(sourcePath = sys.path[0], api = '2.2')
 
@@ -24,4 +24,5 @@ parser.options.add_argument('--enable-auto-versioning', action='store_false', de
                        default=True, help='Enables the auto versioning script')
 parser.options.add_argument('--targets', type=str, dest='targets', default=None,
                        help='Override the target architecture (use commas to separate multiple targets).')
+
 parser.Configure()

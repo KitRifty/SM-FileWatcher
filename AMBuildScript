@@ -167,15 +167,11 @@ class ExtensionConfig(object):
       '-Wno-unused',
       '-Wno-switch',
       '-Wno-array-bounds',
-      '-msse',
-      '-m32',
       '-fvisibility=hidden',
     ]
 
-    if cxx.version == 'apple-clang-6.0' or cxx.version == 'clang-3.4':
-      cxx.cxxflags += ['-std=c++1y']
-    else:
-      cxx.cxxflags += ['-std=c++14']
+    if cxx.target.arch in ['x86', 'x86_64']:
+      cxx.cflags += ['-msse']
 
     cxx.cxxflags += [
       '-fno-exceptions',
@@ -183,8 +179,8 @@ class ExtensionConfig(object):
       '-Wno-non-virtual-dtor',
       '-Wno-overloaded-virtual',
       '-fvisibility-inlines-hidden',
+      '-std=c++17'
     ]
-    cxx.linkflags += ['-m32']
 
     have_gcc = cxx.family == 'gcc'
     have_clang = cxx.family == 'clang'
@@ -240,9 +236,9 @@ class ExtensionConfig(object):
       '/EHsc',
       '/GR-',
       '/TP',
+      '/std:c++17'
     ]
     cxx.linkflags += [
-      '/MACHINE:X86',
       'kernel32.lib',
       'user32.lib',
       'gdi32.lib',
@@ -339,7 +335,7 @@ class ExtensionConfig(object):
     self.ConfigureForExtension(context, binary.compiler)
     return binary
 
-  def ConfigureForHL2(self, binary):
+  def ConfigureForHL2(self, context, binary):
     compiler = binary.compiler
 
     compiler.defines += ['META_NO_HL2SDK']
@@ -356,19 +352,19 @@ class ExtensionConfig(object):
 
     return binary
 
-  def HL2Library(self, context, name):
-    binary = context.compiler.Library(name)
+  def HL2Library(self, context, compiler, name):
+    binary = self.Library(context, compiler, name)
     self.ConfigureForExtension(context, binary.compiler)
-    return self.ConfigureForHL2(binary)
+    return self.ConfigureForHL2(context, binary)
 
   def HL2Project(self, context, name):
-    project = context.compiler.LibraryProject(name)
+    project = self.LibraryProject(name)
     self.ConfigureForExtension(context, project.compiler)
     return project
 
-  def HL2Config(self, project, name):
-    binary = project.Configure(name, '{0}'.format(self.tag))
-    return self.ConfigureForHL2(binary)
+  def HL2Config(self, project, context, compiler, name):
+    binary = project.Configure(name, f'{self.tag} - {compiler.target.arch}')
+    return self.ConfigureForHL2(context, binary)
 
 Extension = ExtensionConfig()
 Extension.detectSDKs()
