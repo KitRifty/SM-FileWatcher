@@ -1,0 +1,18 @@
+# vim: set sts=2 ts=8 sw=2 tw=99 et ft=python:
+import os
+
+sourceFiles = [
+  'watcher.cpp',
+  'helpers.cpp'
+]
+
+rvalue = {}
+
+for cxx in builder.targets:
+    arch = cxx.target.arch
+
+    lib = Extension.StaticLibrary(builder, cxx, 'watcher')
+    lib.sources += sourceFiles
+    task = builder.Add(lib)
+
+    rvalue[arch] = task.binary

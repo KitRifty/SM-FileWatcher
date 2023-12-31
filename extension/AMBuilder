@@ -6,9 +6,7 @@ projectName = 'filewatcher'
 # smsdk_ext.cpp will be automatically added later
 sourceFiles = [
   'extension.cpp',
-  'watcher.cpp',
-  'filesystemwatcher.cpp',
-  'helpers.cpp'
+  'filesystemwatcher.cpp'
 ]
 
 for cxx in builder.targets:
@@ -27,5 +25,9 @@ for cxx in builder.targets:
 
   if binary.compiler.behavior == 'gcc':
     binary.compiler.cxxflags += ['-Wno-invalid-offsetof']
+
+  binary.compiler.postlink += [
+     Extension.watcher_lib[arch]
+  ]
 
   Extension.extensions += [builder.Add(binary)]

@@ -27,9 +27,8 @@
  * or <http://www.sourcemod.net/license.php>.
  */
 
-#ifndef _INCLUDE_WATCHER_H_
-#define _INCLUDE_WATCHER_H_
-#pragma once
+#ifndef WATCHER_H_
+#define WATCHER_H_
 
 #include <filesystem>
 #include <vector>
@@ -41,95 +40,104 @@
 
 #ifdef __linux__
 #else
-#define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
-#include <windef.h>
 #endif
+
+#include "helpers.h"
 
 class DirectoryWatcher
 {
 public:
-	enum NotifyFilters
+	enum NotifyFilterFlags : unsigned int
 	{
-		FSW_NOTIFY_NONE = 0,
-		FSW_NOTIFY_CREATED = (1 << 0),
-		FSW_NOTIFY_DELETED = (1 << 1),
-		FSW_NOTIFY_MODIFIED = (1 << 2),
-		FSW_NOTIFY_RENAMED = (1 << 3)
+		kNone = 0,
+		kCreated = (1 << 0),
+		kDeleted = (1 << 1),
+		kModified = (1 << 2),
+		kRenamed = (1 << 3),
+		kNotifyAll = (kNone - 1)
 	};
 
-protected:
-	class NotifyEvent
+	struct WatchOptions
 	{
-	public:
-		enum NotifyEventType
-		{
-			FILESYSTEM = 0,
-			START,
-			EXIT
-		};
-
-		NotifyEventType type;
-		NotifyFilters flags;
-#ifdef __linux__
-		uint32_t cookie;
-#endif
-		std::string lastPath;
-		std::string path;
-	};
-
-	bool m_watching;
-	std::filesystem::path m_path;
-
-public:
-	bool m_includeSubdirectories;
-	NotifyFilters m_notifyFilter;
-	size_t m_bufferSize;
-	int m_retryInterval;
-
-private:
-#ifdef __linux__
-	int m_threadCancelEventHandle;
-#else
-	HANDLE m_threadCancelEventHandle;
-#endif
-
-	class ThreadConfig
-	{
-	public:
-		std::filesystem::path root_path;
-		bool includeSubdirectories;
-		NotifyFilters notifyFilters;
+		bool subtree;
+		bool symlinks;
+		NotifyFilterFlags notifyFilterFlags;
 		size_t bufferSize;
 		int retryInterval;
 	};
 
+	enum NotifyEventType
+	{
+		kFilesystem = 0,
+		kStart,
+		kStop
+	};
+
+	struct NotifyEvent
+	{
+	public:
+		NotifyEventType type;
+		NotifyFilterFlags flags;
+		std::string lastPath;
+		std::string path;
+
+#ifdef __linux__
+		uint32_t cookie;
+#endif
+	};
+
+	typedef std::queue<std::unique_ptr<NotifyEvent>> EventQueue;
+
+public:
+	DirectoryWatcher();
+	virtual ~DirectoryWatcher();
+	bool Watch(const std::filesystem::path &absPath, const WatchOptions &options);
+	bool IsWatching(const std::filesystem::path &absPath) const;
+	void StopWatching();
+
+	void ProcessEvents();
+	virtual void OnProcessEvent(const NotifyEvent &event);
+
+private:
+	std::unique_ptr<EventQueue> eventsBuffer;
+	std::unique_ptr<std::mutex> eventsBufferMutex;
+
+	class Worker
+	{
+	public:
+		Worker(const std::filesystem::path &path, const WatchOptions &options, EventQueue *eventsBuffer, std::mutex *eventsBufferMutex);
+		~Worker();
+		inline bool IsRunning() const { return thread.joinable(); }
+
+		const std::filesystem::path basePath;
+
+	private:
+		void ThreadProc();
+
+		EventQueue *eventsBuffer;
+		std::mutex *eventsBufferMutex;
+
+		const WatchOptions options;
+		std::vector<std::unique_ptr<Worker>> workers;
+		std::thread thread;
+
+#ifdef __linux__
+#else
+		ScopedHandle directory;
+		ScopedHandle cancelEvent;
+#endif
+	};
+
+	std::vector<std::unique_ptr<Worker>> workers;
+
+#ifdef __linux__
 	std::thread m_thread;
 	std::mutex m_threadRunningMutex;
 	bool m_threadRunning;
-	std::mutex m_changeEventsMutex;
-	std::queue<std::unique_ptr<NotifyEvent>> m_changeEvents;
-	bool m_processingEvents;
-
-public:
-	DirectoryWatcher(const std::filesystem::path& absPath);
-	virtual ~DirectoryWatcher();
-
-	inline bool IsWatching() const { return m_watching; }
-	bool Start();
-	void Stop();
-
-private:
-	bool IsThreadRunning();
-	void SetThreadRunning(bool state);
-
-	void RequestCancelThread();
-
-	void ThreadProc(std::unique_ptr<ThreadConfig> data);
-
-protected:
-	void ProcessEvents();
-	virtual void OnProcessEvent(const NotifyEvent &event);
+	int m_threadCancelEventHandle;
+#else
+#endif
 };
 
-#endif
+#endif // WATCHER_H_

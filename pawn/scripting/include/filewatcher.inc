@@ -8,7 +8,7 @@
  * This program is free software; you can redistribute it and/or modify it under
  * the terms of the GNU General Public License, version 3.0, as published by the
  * Free Software Foundation.
- * 
+ *
  * This program is distributed in the hope that it will be useful, but WITHOUT
  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
  * FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
@@ -50,20 +50,20 @@ methodmap FileSystemWatcher < Handle
 {
 	/**
 	 * Indicates whether the watcher is enabled.
-	 * 
+	 *
 	 * Upon setting this to true, the watcher will begin monitoring its directory.
 	 * However, events will not be sent to plugins until the first `OnGameFrame()` is
 	 * called, so consider only watching when events can be sent such as on/after
 	 * `OnMapStart()` or `OnConfigsExecuted()`. The `OnStarted` and `OnStopped` callbacks
 	 * can be used to determine if the watcher is actually receiving events or not.
-	 * 
+	 *
 	 * It is not always guaranteed that the watcher will be receiving file change events
 	 * especially if the watched directory is deleted, renamed, or does not exist.
-	 * In this scenario, the watcher will retry watching the directory every `RetryInterval` 
+	 * In this scenario, the watcher will retry watching the directory every `RetryInterval`
 	 * milliseconds until it succeeds.
-	 * 
-	 * Once you start watching a directory, you are discouraged from moving, renaming, 
-	 * or deleting the directory in any way. In Windows this is not allowed, and in 
+	 *
+	 * Once you start watching a directory, you are discouraged from moving, renaming,
+	 * or deleting the directory in any way. In Windows this is not allowed, and in
 	 * Linux doing so will cause the watcher to stop receiving events and continually
 	 * retry until it is successful.
 	 */
@@ -74,10 +74,21 @@ methodmap FileSystemWatcher < Handle
 	}
 
 	/**
-	 * Indicates whether subdirectories within the watched directory should 
-	 * be monitored.
+	 * Indicates whether subdirectories within the watched directory should
+	 * be monitored. By default this is false.
 	 */
 	property bool IncludeSubdirectories
+	{
+		public native get();
+		public native set(bool value);
+	}
+
+	/**
+	 * If IncludeSubdirectories is true, then this sets whether directory
+	 * symbolic links within the watched directory should also be
+	 * watched. By default this is false.
+	 */
+	property bool WatchDirectoryLinks
 	{
 		public native get();
 		public native set(bool value);
@@ -105,9 +116,9 @@ methodmap FileSystemWatcher < Handle
 	/**
 	 * The size (in bytes) of the internal buffer. The size should be an interval
 	 * of 4KB.
-	 * 
-	 * Sometimes events can be missed which can happen with directories that are very active. 
-	 * You may consider increasing the buffer size if the default size (8KB) isn't enough, 
+	 *
+	 * Sometimes events can be missed which can happen with directories that are very active.
+	 * You may consider increasing the buffer size if the default size (8KB) isn't enough,
 	 * but do not exceed 64KB.
 	 */
 	property int InternalBufferSize
@@ -126,7 +137,7 @@ methodmap FileSystemWatcher < Handle
 
 	/**
 	 * The callback for when the watcher stops receiving file system change events.
-	 * 
+	 *
 	 * This can be triggered if the watcher is explicitly ordered to stop watching,
 	 * or the watched directory is renamed/moved/deleted.
 	 */
@@ -164,15 +175,15 @@ methodmap FileSystemWatcher < Handle
 
 	/**
 	 * The callback for when a file is renamed.
-	 * 
+	 *
 	 * There are slight differences on when this is called depending on the
 	 * operating system, however in both Windows and Linux, changing the
 	 * name of the file will result in a Rename action.
-	 * 
-	 * For Windows: Moving a file from one directory to another is seen as two 
+	 *
+	 * For Windows: Moving a file from one directory to another is seen as two
 	 * actions: Delete (from old directory) and Create (in new directory).
-	 * 
-	 * For Linux: Moving a file from one *watched* directory to another watched 
+	 *
+	 * For Linux: Moving a file from one *watched* directory to another watched
 	 * directory is seen as a Rename action.
 	 */
 	property FileSystemWatcherOnRenamed OnRenamed
@@ -181,18 +192,18 @@ methodmap FileSystemWatcher < Handle
 	}
 
 	/**
-	 * Creates a file watcher object. This listens to the file system for change 
-	 * notifications and raises events when a directory, or file in a directory, 
+	 * Creates a file watcher object. This listens to the file system for change
+	 * notifications and raises events when a directory, or file in a directory,
 	 * changes.
-	 * 
+	 *
 	 * @param path    Path to directory. This path is relative to the game directory.
 	 */
 	public native FileSystemWatcher(const char[] path = "");
 
 	/**
 	 * Retrieves the path of the watched directory, relative to the game directory.
-	 * 
-	 * @note                This will always be trailed with the OS's preferred path separator 
+	 *
+	 * @note                This will always be trailed with the OS's preferred path separator
 	 *                      ("\\" for Windows, "/" for Linux).
 	 * @param buffer        Buffer to store the path.
 	 * @param bufferSize    Size of buffer.
@@ -227,6 +238,8 @@ public void __ext_filewatcher_SetNTVOptional()
 	MarkNativeAsOptional("FileSystemWatcher.IsWatching.set");
 	MarkNativeAsOptional("FileSystemWatcher.IncludeSubdirectories.get");
 	MarkNativeAsOptional("FileSystemWatcher.IncludeSubdirectories.set");
+	MarkNativeAsOptional("FileSystemWatcher.WatchDirectoryLinks.get");
+	MarkNativeAsOptional("FileSystemWatcher.WatchDirectoryLinks.set");
 	MarkNativeAsOptional("FileSystemWatcher.NotifyFilter.get");
 	MarkNativeAsOptional("FileSystemWatcher.NotifyFilter.set");
 	MarkNativeAsOptional("FileSystemWatcher.RetryInterval.get");

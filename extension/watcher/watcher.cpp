@@ -38,46 +38,377 @@
 #include <sys/eventfd.h>
 #include <unistd.h>
 #else
-#include <codecvt>
 #endif
+
+#include <iostream>
 
 namespace fs = std::filesystem;
 
-DirectoryWatcher::DirectoryWatcher(const fs::path& absPath) :
-	m_watching(false),
-	m_includeSubdirectories(false),
-	m_notifyFilter(FSW_NOTIFY_NONE),
-	m_bufferSize(8192),
-	m_retryInterval(1000),
-#ifdef __linux__
-	m_threadCancelEventHandle(-1),
-#else
-	m_threadCancelEventHandle(nullptr),
-#endif
-	m_thread(),
-	m_threadRunning(false),
-	m_processingEvents(false)
+DirectoryWatcher::Worker::Worker(
+	const std::filesystem::path &path,
+	const WatchOptions &_options,
+	EventQueue *eventsBuffer,
+	std::mutex *eventsBufferMutex) : eventsBuffer(eventsBuffer),
+									 eventsBufferMutex(eventsBufferMutex),
+									 basePath(path),
+									 options(_options)
 {
-	m_path = absPath.lexically_normal();
+#ifdef __linux__
+#else
+	auto actualBasePath = fs::path(basePath);
+	if (fs::is_symlink(actualBasePath))
+	{
+		actualBasePath = fs::read_symlink(actualBasePath);
+	}
+
+	directory = CreateFileA(
+		actualBasePath.string().c_str(),
+		FILE_LIST_DIRECTORY | GENERIC_READ,
+		FILE_SHARE_READ | FILE_SHARE_WRITE,
+		nullptr,
+		OPEN_EXISTING,
+		FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+		nullptr);
+
+	if (directory == INVALID_HANDLE_VALUE)
+	{
+		cancelEvent = 0;
+		return;
+	}
+#endif
+
+	if (options.subtree)
+	{
+#ifdef __linux__
+#else
+		if (options.symlinks)
+		{
+			std::queue<fs::path> dirsToTraverse;
+			dirsToTraverse.push(basePath);
+
+			while (!dirsToTraverse.empty())
+			{
+				fs::path currentDir = dirsToTraverse.front();
+				dirsToTraverse.pop();
+
+				for (const auto &entry : fs::directory_iterator(currentDir))
+				{
+					if (fs::is_directory(entry))
+					{
+						if (fs::is_symlink(entry))
+						{
+							workers.push_back(std::make_unique<Worker>(fs::path(entry), options, eventsBuffer, eventsBufferMutex));
+						}
+						else
+						{
+							dirsToTraverse.push(entry);
+						}
+					}
+				}
+			}
+		}
+#endif
+	}
+
+#ifdef __linux__
+#else
+	cancelEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+#endif
+
+	thread = std::thread(&DirectoryWatcher::Worker::ThreadProc, this);
+}
+
+DirectoryWatcher::Worker::~Worker()
+{
+	workers.clear();
+
+#ifdef __linux__
+#else
+	SetEvent(cancelEvent);
+#endif
+
+	if (thread.joinable())
+	{
+		thread.join();
+	}
+}
+
+void DirectoryWatcher::Worker::ThreadProc()
+{
+#ifdef __linux__
+#else
+	auto buffer = std::make_unique<char[]>(options.bufferSize);
+	ScopedHandle watchEvent(CreateEvent(nullptr, TRUE, FALSE, nullptr));
+
+	HANDLE waitHandles[2];
+	waitHandles[0] = cancelEvent;
+	waitHandles[1] = watchEvent;
+
+	OVERLAPPED overlapped;
+	ZeroMemory(&overlapped, sizeof overlapped);
+	overlapped.hEvent = watchEvent;
+#endif
+
+	bool running = true;
+
+	{
+		std::lock_guard<std::mutex> lock(*eventsBufferMutex);
+
+		auto change = std::make_unique<NotifyEvent>();
+		change->type = kStart;
+		change->path = basePath.string();
+
+		eventsBuffer->push(std::move(change));
+	}
+
+	while (running)
+	{
+#ifdef __linux__
+#else
+		if (!ReadDirectoryChangesExW(
+				directory,
+				buffer.get(),
+				options.bufferSize,
+				options.subtree,
+				FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE,
+				nullptr,
+				&overlapped,
+				nullptr,
+				ReadDirectoryNotifyExtendedInformation))
+		{
+			running = false;
+			break;
+		}
+
+		switch (WaitForMultipleObjects(2, waitHandles, FALSE, INFINITE))
+		{
+		case WAIT_OBJECT_0 + 1:
+		{
+			DWORD dwBytes = 0;
+			if (!GetOverlappedResult(directory, &overlapped, &dwBytes, TRUE))
+			{
+				running = false;
+				break;
+			}
+
+			ResetEvent(watchEvent);
+
+			if (dwBytes == 0)
+			{
+				break;
+			}
+
+			std::vector<std::unique_ptr<NotifyEvent>> queuedEvents;
+
+			char *p = buffer.get();
+			for (;;)
+			{
+				FILE_NOTIFY_EXTENDED_INFORMATION *info = reinterpret_cast<FILE_NOTIFY_EXTENDED_INFORMATION *>(p);
+				std::wstring fileName(info->FileName, info->FileNameLength / sizeof(wchar_t));
+				fs::path path = basePath / fileName;
+
+				switch (info->Action)
+				{
+				case FILE_ACTION_ADDED:
+				{
+					auto change = std::make_unique<NotifyEvent>();
+					change->type = kFilesystem;
+					change->flags = kCreated;
+					change->path = path.string();
+
+					queuedEvents.push_back(std::move(change));
+
+					if (options.subtree && options.symlinks && fs::is_symlink(path) && fs::is_directory(path))
+					{
+						workers.push_back(std::make_unique<Worker>(path, options, eventsBuffer, eventsBufferMutex));
+					}
+
+					break;
+				}
+				case FILE_ACTION_REMOVED:
+				{
+					auto change = std::make_unique<NotifyEvent>();
+					change->type = kFilesystem;
+					change->flags = kDeleted;
+					change->path = path.string();
+
+					queuedEvents.push_back(std::move(change));
+
+					if (options.subtree)
+					{
+						for (auto it = workers.begin(); it != workers.end(); it++)
+						{
+							auto &worker = *it;
+
+							if (!worker->IsRunning() || worker->basePath == path)
+							{
+								it = workers.erase(it);
+							}
+						}
+					}
+
+					break;
+				}
+				case FILE_ACTION_MODIFIED:
+				{
+					if (info->FileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+					{
+						break;
+					}
+
+					auto change = std::make_unique<NotifyEvent>();
+					change->type = kFilesystem;
+					change->flags = kModified;
+					change->path = path.string();
+
+					queuedEvents.push_back(std::move(change));
+
+					break;
+				}
+				case FILE_ACTION_RENAMED_OLD_NAME:
+				{
+					auto change = std::make_unique<NotifyEvent>();
+					change->type = kFilesystem;
+					change->flags = kRenamed;
+					change->lastPath = path.string();
+
+					queuedEvents.push_back(std::move(change));
+
+					break;
+				}
+				case FILE_ACTION_RENAMED_NEW_NAME:
+				{
+					auto &change = queuedEvents.back();
+					change->path = path.string();
+
+					if (options.subtree)
+					{
+						for (auto it = workers.begin(); it != workers.end(); it++)
+						{
+							auto &worker = *it;
+
+							if (!worker->IsRunning() || worker->basePath == change->lastPath)
+							{
+								it = workers.erase(it);
+							}
+						}
+
+						if (options.symlinks && fs::is_symlink(path) && fs::is_directory(path))
+						{
+							workers.push_back(std::make_unique<Worker>(path, options, eventsBuffer, eventsBufferMutex));
+						}
+					}
+
+					break;
+				}
+				}
+
+				if (!info->NextEntryOffset)
+				{
+					break;
+				}
+
+				p += info->NextEntryOffset;
+			}
+
+			std::lock_guard<std::mutex> lock(*eventsBufferMutex);
+
+			for (auto it = queuedEvents.begin(); it != queuedEvents.end(); it++)
+			{
+				auto &change = *it;
+				if (change->flags & options.notifyFilterFlags)
+				{
+					eventsBuffer->push(std::move(*it));
+				}
+			}
+
+			break;
+		}
+		case WAIT_FAILED:
+		{
+			running = false;
+
+			std::cerr << "Failed to wait: code " << std::hex << GetLastError() << std::endl;
+
+			break;
+		}
+		default:
+		{
+			running = false;
+			break;
+		}
+		}
+#endif
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(*eventsBufferMutex);
+
+		auto change = std::make_unique<NotifyEvent>();
+		change->type = kStop;
+		change->path = basePath.string();
+
+		eventsBuffer->push(std::move(change));
+	}
+}
+
+DirectoryWatcher::DirectoryWatcher()
+#ifdef __linux__
+	: m_threadCancelEventHandle(-1),
+	  m_threadRunning(false),
+	  m_thread()
+#else
+#endif
+{
+	eventsBuffer = std::make_unique<EventQueue>();
+	eventsBufferMutex = std::make_unique<std::mutex>();
 }
 
 DirectoryWatcher::~DirectoryWatcher()
 {
-	Stop();
-
 #ifdef __linux__
 	if (fcntl(m_threadCancelEventHandle, F_GETFD) != -1)
 	{
 		close(m_threadCancelEventHandle);
 	}
 #else
-	if (m_threadCancelEventHandle)
-	{
-		CloseHandle(m_threadCancelEventHandle);
-	}
 #endif
+
+	StopWatching();
 }
 
+bool DirectoryWatcher::Watch(const std::filesystem::path &absPath, const WatchOptions &options)
+{
+	if (!fs::is_directory(absPath))
+	{
+		return false;
+	}
+
+	workers.push_back(std::make_unique<Worker>(absPath, options, eventsBuffer.get(), eventsBufferMutex.get()));
+
+	return true;
+}
+
+bool DirectoryWatcher::IsWatching(const std::filesystem::path &absPath) const
+{
+	for (auto it = workers.begin(); it != workers.end(); it++)
+	{
+		auto &worker = *it;
+		if (worker->IsRunning() && worker->basePath == absPath)
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void DirectoryWatcher::StopWatching()
+{
+	workers.clear();
+}
+
+/*
 bool DirectoryWatcher::Start()
 {
 	if (IsWatching())
@@ -85,12 +416,10 @@ bool DirectoryWatcher::Start()
 		return true;
 	}
 
-	std::unique_ptr<ThreadConfig> config = std::make_unique<ThreadConfig>();
-	config->root_path = m_path;
-	config->includeSubdirectories = m_includeSubdirectories;
-	config->notifyFilters = m_notifyFilter;
-	config->bufferSize = m_bufferSize;
-	config->retryInterval = m_retryInterval;
+	if (!fs::is_directory(m_path))
+	{
+		return false;
+	}
 
 #ifdef __linux__
 	if (fcntl(m_threadCancelEventHandle, F_GETFD) == -1)
@@ -102,19 +431,13 @@ bool DirectoryWatcher::Start()
 		uint64_t u;
 		read(m_threadCancelEventHandle, &u, sizeof(u));
 	}
+
+	m_thread = std::thread(&DirectoryWatcher::ThreadProc, this, std::move(config));
 #else
-	if (!m_threadCancelEventHandle)
-	{
-		m_threadCancelEventHandle = CreateEvent(nullptr, TRUE, FALSE, nullptr);
-	}
-	else
-	{
-		ResetEvent(m_threadCancelEventHandle);
-	}
+	workers.push_back(std::make_unique<Worker>(this, m_path, watchOptions));
 #endif
 
-	m_watching = true;
-	m_thread = std::thread(&DirectoryWatcher::ThreadProc, this, std::move(config));
+	watching = true;
 
 	return true;
 }
@@ -126,41 +449,26 @@ void DirectoryWatcher::Stop()
 		return;
 	}
 
-	m_watching = false;
+	watching = false;
 
-	RequestCancelThread();
+#ifdef __linux__
+	uint64_t u = 1;
+	write(m_threadCancelEventHandle, &u, sizeof(u));
 
 	if (m_thread.joinable())
 	{
 		m_thread.join();
 	}
+#else
+	workers.clear();
+#endif
 
 	ProcessEvents();
 }
+*/
 
-bool DirectoryWatcher::IsThreadRunning()
-{
-	std::lock_guard<std::mutex> lock(m_threadRunningMutex);
-	return m_threadRunning;
-}
-
-void DirectoryWatcher::SetThreadRunning(bool state)
-{
-	std::lock_guard<std::mutex> lock(m_threadRunningMutex);
-	m_threadRunning = state;
-}
-
-void DirectoryWatcher::RequestCancelThread()
-{
-#ifdef __linux__
-	uint64_t u = 1;
-	write(m_threadCancelEventHandle, &u, sizeof(u));
-#else
-	SetEvent(m_threadCancelEventHandle);
-#endif
-}
-
-void DirectoryWatcher::ThreadProc(std::unique_ptr<ThreadConfig> config)
+/*
+void DirectoryWatcher::ThreadProc(std::unique_ptr<WatchOptions> config)
 {
 	class ThreadData
 	{
@@ -170,9 +478,6 @@ void DirectoryWatcher::ThreadProc(std::unique_ptr<ThreadConfig> config)
 		int inotify_root_wd;
 		std::map<int, fs::path> wd;
 		uint32_t mask;
-#else
-		HANDLE directory;
-		HANDLE changeEvent;
 #endif
 
 		ThreadData()
@@ -182,8 +487,8 @@ void DirectoryWatcher::ThreadProc(std::unique_ptr<ThreadConfig> config)
 			inotify_root_wd = -1;
 			mask = 0;
 #else
-			directory = INVALID_HANDLE_VALUE;
-			changeEvent = nullptr;
+			//directory = INVALID_HANDLE_VALUE;
+			//changeEvent = nullptr;
 #endif
 		}
 
@@ -200,6 +505,9 @@ void DirectoryWatcher::ThreadProc(std::unique_ptr<ThreadConfig> config)
 				close(inotify_fd);
 			}
 #else
+			std::lock_guard<std::mutex> lock(threadsMutex);
+			threads.clear();
+
 			if (changeEvent && changeEvent != INVALID_HANDLE_VALUE)
 			{
 				CloseHandle(changeEvent);
@@ -215,7 +523,7 @@ void DirectoryWatcher::ThreadProc(std::unique_ptr<ThreadConfig> config)
 #ifdef __linux__
 		int AddWatch(const std::unique_ptr<ThreadConfig> &config, const fs::path &path, uint32_t _mask = 0)
 #else
-		HANDLE AddWatch(const std::unique_ptr<ThreadConfig> &config, const fs::path &path, DWORD _dwNotifyFilter = 0)
+		HANDLE AddWatch(const std::unique_ptr<WatchOptions> &config, const fs::path &path, DWORD _dwNotifyFilter = 0)
 #endif
 		{
 			fs::path lexicalAbsPath(config->root_path);
@@ -290,8 +598,6 @@ void DirectoryWatcher::ThreadProc(std::unique_ptr<ThreadConfig> config)
 
 	while (isRunning)
 	{
-		SetThreadRunning(true);
-
 		bool didStart = false;
 
 		std::unique_ptr<ThreadData> data = std::make_unique<ThreadData>();
@@ -597,7 +903,6 @@ void DirectoryWatcher::ThreadProc(std::unique_ptr<ThreadConfig> config)
 						break;
 					}
 
-					std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
 					std::vector<std::unique_ptr<NotifyEvent>> queuedEvents;
 
 					char *p = buffer.get();
@@ -613,7 +918,7 @@ void DirectoryWatcher::ThreadProc(std::unique_ptr<ThreadConfig> config)
 							{
 								if (config->notifyFilters & (FSW_NOTIFY_CREATED | FSW_NOTIFY_RENAMED))
 								{
-									fs::path path = converter.to_bytes(fileName);
+									fs::path path(fileName);
 
 									if (!queuedEvents.empty())
 									{
@@ -663,7 +968,7 @@ void DirectoryWatcher::ThreadProc(std::unique_ptr<ThreadConfig> config)
 									auto change = std::make_unique<NotifyEvent>();
 									change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
 									change->flags = FSW_NOTIFY_DELETED;
-									change->path = converter.to_bytes(fileName);
+									change->path = fs::path(fileName).string();
 
 									queuedEvents.push_back(std::move(change));
 								}
@@ -682,7 +987,7 @@ void DirectoryWatcher::ThreadProc(std::unique_ptr<ThreadConfig> config)
 									auto change = std::make_unique<NotifyEvent>();
 									change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
 									change->flags = FSW_NOTIFY_MODIFIED;
-									change->path = converter.to_bytes(fileName);
+									change->path = fs::path(fileName).string();
 
 									queuedEvents.push_back(std::move(change));
 								}
@@ -696,7 +1001,7 @@ void DirectoryWatcher::ThreadProc(std::unique_ptr<ThreadConfig> config)
 									auto change = std::make_unique<NotifyEvent>();
 									change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
 									change->flags = FSW_NOTIFY_RENAMED;
-									change->lastPath = converter.to_bytes(fileName);
+									change->lastPath = fs::path(fileName).string();
 
 									queuedEvents.push_back(std::move(change));
 								}
@@ -708,7 +1013,7 @@ void DirectoryWatcher::ThreadProc(std::unique_ptr<ThreadConfig> config)
 								if (config->notifyFilters & FSW_NOTIFY_RENAMED)
 								{
 									auto &change = queuedEvents.back();
-									change->path = converter.to_bytes(fileName);
+									change->path = fs::path(fileName).string();
 								}
 
 								break;
@@ -750,8 +1055,6 @@ void DirectoryWatcher::ThreadProc(std::unique_ptr<ThreadConfig> config)
 		}
 
 terminate:
-		SetThreadRunning(false);
-
 		if (didStart)
 		{
 			std::lock_guard<std::mutex> lock(m_changeEventsMutex);
@@ -789,28 +1092,20 @@ terminate:
 		}
 	}
 }
+*/
 
 void DirectoryWatcher::ProcessEvents()
 {
-	if (m_processingEvents)
+	std::lock_guard<std::mutex> lock(*eventsBufferMutex.get());
+
+	while (!eventsBuffer->empty())
 	{
-		return;
-	}
-
-	std::lock_guard<std::mutex> lock(m_changeEventsMutex);
-
-	m_processingEvents = true;
-
-	while (!m_changeEvents.empty())
-	{
-		std::unique_ptr<NotifyEvent> &front = m_changeEvents.front();
+		auto &front = eventsBuffer->front();
 		OnProcessEvent(*front.get());
-		m_changeEvents.pop();
+		eventsBuffer->pop();
 	}
-
-	m_processingEvents = false;
 }
 
-void DirectoryWatcher::OnProcessEvent(const NotifyEvent& event)
+void DirectoryWatcher::OnProcessEvent(const NotifyEvent &event)
 {
 }

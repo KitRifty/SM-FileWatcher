@@ -45,7 +45,7 @@ class ExtensionConfig(object):
       target_archs = builder.options.targets.split(',')
     else:
       target_archs = ['x86']
-    
+
     for arch in target_archs:
       try:
         cxx = builder.DetectCxx(target_arch = arch)
@@ -71,7 +71,7 @@ class ExtensionConfig(object):
     if builder.options.debug == '1':
       return 'Debug'
     return 'Release'
-  
+
   def detectProductVersion(self):
     builder.AddConfigureFile('product.version')
 
@@ -227,7 +227,7 @@ class ExtensionConfig(object):
       '_CRT_SECURE_NO_DEPRECATE',
       '_CRT_SECURE_NO_WARNINGS',
       '_CRT_NONSTDC_NO_DEPRECATE',
-      '_ITERATOR_DEBUG_LEVEL=0',
+      '_ITERATOR_DEBUG_LEVEL=0'
     ]
     cxx.cflags += [
       '/W3',
@@ -284,8 +284,8 @@ class ExtensionConfig(object):
     cxx.cxxflags += ['-stdlib=libstdc++']
 
   def configure_windows(self, cxx):
-    cxx.defines += ['WIN32', '_WINDOWS']
-	
+    cxx.defines += ['WIN32', '_WINDOWS', 'WIN32_LEAN_AND_MEAN']
+
   def AddVersioning(self, binary):
     if binary.compiler.target.platform == 'mac':
       if binary.type == 'library':
@@ -303,7 +303,20 @@ class ExtensionConfig(object):
     if binary.compiler.like('msvc'):
       binary.compiler.linkflags += ['/SUBSYSTEM:WINDOWS']
     return binary
-  
+
+  def ProgramBuilder(self, compiler, name):
+    binary = compiler.Program(name)
+    self.AddVersioning(binary)
+    if '-static-libgcc' in binary.compiler.linkflags:
+      binary.compiler.linkflags.remove('-static-libgcc')
+    if '-lgcc_eh' in binary.compiler.linkflags:
+      binary.compiler.linkflags.remove('-lgcc_eh')
+    if binary.compiler.like('gcc'):
+      binary.compiler.linkflags += ['-lstdc++', '-lpthread']
+    if binary.compiler.like('msvc'):
+      binary.compiler.linkflags += ['/SUBSYSTEM:CONSOLE']
+    return binary
+
   def StaticLibraryBuilder(self, compiler, name):
     return compiler.StaticLibrary(name)
 
@@ -311,6 +324,11 @@ class ExtensionConfig(object):
     compiler = compiler.clone()
     SetArchFlags(compiler)
     return self.LibraryBuilder(compiler, name)
+
+  def Program(self, context, compiler, name):
+    compiler = compiler.clone()
+    SetArchFlags(compiler)
+    return self.ProgramBuilder(compiler, name)
 
   def StaticLibrary(self, context, compiler, name):
     compiler = compiler.clone()
@@ -380,7 +398,16 @@ if Extension.use_auto_versioning():
     { 'Extension': Extension }
   )
 
-# Add additional buildscripts here
+Extension.watcher_lib = builder.Build(
+  'extension/watcher/AMBuilder',
+  { 'Extension': Extension }
+)
+
+Extension.tests = builder.Build(
+  'extension/tests/AMBuilder',
+  { 'Extension': Extension }
+)
+
 BuildScripts = [
   'extension/AMBuilder',
   'PackageScript',

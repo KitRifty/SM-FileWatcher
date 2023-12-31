@@ -1,0 +1,27 @@
+# vim: set sts=2 ts=8 sw=2 tw=99 et ft=python:
+import os
+
+projectName = 'tests'
+
+sourceFiles = [
+    'main.cpp'
+]
+
+rvalue = {}
+
+for cxx in builder.targets:
+    arch = cxx.target.arch
+
+    binary = Extension.Program(builder, cxx, 'tests')
+    binary.sources += sourceFiles
+    binary.compiler.cxxincludes += [
+      os.path.join(builder.currentSourcePath, '../watcher')
+    ]
+
+    binary.compiler.postlink += [
+        Extension.watcher_lib[arch]
+    ]
+
+    task = builder.Add(binary)
+
+    rvalue[arch] = task.binary

@@ -29,37 +29,65 @@
 
 #include "filesystemwatcher.h"
 #include <cstring>
-
-#ifdef __linux__
-#else
-#include <locale>
-#include <codecvt>
-#endif
-
 #include "smsdk_ext.h"
-#include "helpers.h"
 
 namespace fs = std::filesystem;
 
-SMDirectoryWatcher::SMDirectoryWatcher(const std::string& path) :
-	DirectoryWatcher((fs::path(g_pSM->GetGamePath()) / path).lexically_normal()),
-	m_Handle(0),
-	m_owningContext(nullptr),
-	m_onStarted(nullptr),
-	m_onStopped(nullptr),
-	m_onCreated(nullptr),
-	m_onDeleted(nullptr),
-	m_onModified(nullptr),
-	m_onRenamed(nullptr)
+SMDirectoryWatcher::SMDirectoryWatcher(const fs::path &path)
+	: DirectoryWatcher(),
+	  watching(false),
+	  gamePath(fs::path(path).lexically_normal()),
+	  options{false, false, kNone, 8192, 1000},
+	  handle(0),
+	  owningContext(nullptr),
+	  onStarted(nullptr),
+	  onStopped(nullptr),
+	  onCreated(nullptr),
+	  onDeleted(nullptr),
+	  onModified(nullptr),
+	  onRenamed(nullptr) {}
+
+bool SMDirectoryWatcher::Start()
 {
-	m_relPath = fs::path(path).lexically_normal();
+	if (IsWatching())
+	{
+		return true;
+	}
+
+	fs::path absPath(g_pSM->GetGamePath());
+	absPath = absPath.lexically_normal() / gamePath;
+
+	if (!Watch(absPath, options))
+	{
+		return false;
+	}
+
+	watching = true;
+
+	if (onStarted && onStarted->IsRunnable())
+	{
+		onStarted->PushCell(handle);
+		onStarted->Execute(nullptr);
+	}
+
+	return true;
 }
 
-size_t SMDirectoryWatcher::GetPath(char* buffer, size_t bufferSize)
+void SMDirectoryWatcher::Stop()
 {
-	std::strncpy(buffer, m_relPath.string().c_str(), bufferSize - 1);
-	buffer[bufferSize - 1] = '\0';
-	return strlen(buffer) + 1;
+	if (!IsWatching())
+	{
+		return;
+	}
+
+	watching = false;
+	StopWatching();
+
+	if (onStopped && onStopped->IsRunnable())
+	{
+		onStopped->PushCell(handle);
+		onStopped->Execute(nullptr);
+	}
 }
 
 void SMDirectoryWatcher::OnGameFrame(bool simulating)
@@ -70,137 +98,127 @@ void SMDirectoryWatcher::OnGameFrame(bool simulating)
 	}
 }
 
-void SMDirectoryWatcher::OnPluginUnloaded(SourceMod::IPlugin* plugin)
+void SMDirectoryWatcher::OnPluginUnloaded(SourceMod::IPlugin *plugin)
 {
-	IPluginContext* context = plugin->GetBaseContext();
+	IPluginContext *context = plugin->GetBaseContext();
 
-	if (m_owningContext == context)
+	if (owningContext == context)
 	{
-		m_owningContext = nullptr;
+		owningContext = nullptr;
 		Stop();
 	}
 
-	if (m_onStarted && m_onStarted->GetParentContext() == context)
+	if (onStarted && onStarted->GetParentContext() == context)
 	{
-		m_onStarted = nullptr;
+		onStarted = nullptr;
 	}
 
-	if (m_onStopped && m_onStopped->GetParentContext() == context)
+	if (onStopped && onStopped->GetParentContext() == context)
 	{
-		m_onStopped = nullptr;
+		onStopped = nullptr;
 	}
 
-	if (m_onCreated && m_onCreated->GetParentContext() == context)
+	if (onCreated && onCreated->GetParentContext() == context)
 	{
-		m_onCreated = nullptr;
+		onCreated = nullptr;
 	}
 
-	if (m_onDeleted && m_onDeleted->GetParentContext() == context)
+	if (onDeleted && onDeleted->GetParentContext() == context)
 	{
-		m_onDeleted = nullptr;
+		onDeleted = nullptr;
 	}
 
-	if (m_onModified && m_onModified->GetParentContext() == context)
+	if (onModified && onModified->GetParentContext() == context)
 	{
-		m_onModified = nullptr;
+		onModified = nullptr;
 	}
 
-	if (m_onRenamed && m_onRenamed->GetParentContext() == context)
+	if (onRenamed && onRenamed->GetParentContext() == context)
 	{
-		m_onRenamed = nullptr;
+		onRenamed = nullptr;
 	}
 }
 
-void SMDirectoryWatcher::OnProcessEvent(const NotifyEvent& event)
+void SMDirectoryWatcher::OnProcessEvent(const NotifyEvent &event)
 {
 	switch (event.type)
 	{
-		case NotifyEvent::NotifyEventType::FILESYSTEM:
+	case kFilesystem:
+	{
+		if (event.flags & kCreated)
 		{
-			if (event.flags & FSW_NOTIFY_CREATED)
+			if (onCreated && onCreated->IsRunnable())
 			{
-				if (m_onCreated && m_onCreated->IsRunnable())
-				{
-					m_onCreated->PushCell(m_Handle);
-					m_onCreated->PushString(event.path.c_str());
-					m_onCreated->Execute(nullptr);
-				}
-			}
+				auto relPath = fs::path(event.path).lexically_relative(g_pSM->GetGamePath() / gamePath);
 
-			if (event.flags & FSW_NOTIFY_DELETED)
-			{
-				if (m_onDeleted && m_onDeleted->IsRunnable())
-				{
-					m_onDeleted->PushCell(m_Handle);
-					m_onDeleted->PushString(event.path.c_str());
-					m_onDeleted->Execute(nullptr);
-				}
+				onCreated->PushCell(handle);
+				onCreated->PushString(relPath.string().c_str());
+				onCreated->Execute(nullptr);
 			}
-
-			if (event.flags & FSW_NOTIFY_MODIFIED)
-			{
-				if (m_onModified && m_onModified->IsRunnable())
-				{
-					m_onModified->PushCell(m_Handle);
-					m_onModified->PushString(event.path.c_str());
-					m_onModified->Execute(nullptr);
-				}
-			}
-
-			if (event.flags & FSW_NOTIFY_RENAMED)
-			{
-				if (m_onRenamed && m_onRenamed->IsRunnable())
-				{
-					m_onRenamed->PushCell(m_Handle);
-					m_onRenamed->PushString(event.lastPath.c_str());
-					m_onRenamed->PushString(event.path.c_str());
-					m_onRenamed->Execute(nullptr);
-				}
-			}
-
-			break;
 		}
-		case NotifyEvent::NotifyEventType::START:
+
+		if (event.flags & kDeleted)
 		{
-			if (m_onStarted && m_onStarted->IsRunnable())
+			if (onDeleted && onDeleted->IsRunnable())
 			{
-				m_onStarted->PushCell(m_Handle);
-				m_onStarted->Execute(nullptr);
-			}
+				auto relPath = fs::path(event.path).lexically_relative(g_pSM->GetGamePath() / gamePath);
 
-			break;
+				onDeleted->PushCell(handle);
+				onDeleted->PushString(relPath.string().c_str());
+				onDeleted->Execute(nullptr);
+			}
 		}
-		case NotifyEvent::NotifyEventType::EXIT:
+
+		if (event.flags & kModified)
 		{
-			if (m_onStopped && m_onStopped->IsRunnable())
+			if (onModified && onModified->IsRunnable())
 			{
-				m_onStopped->PushCell(m_Handle);
-				m_onStopped->Execute(nullptr);
-			}
+				auto relPath = fs::path(event.path).lexically_relative(g_pSM->GetGamePath() / gamePath);
 
-			break;
+				onModified->PushCell(handle);
+				onModified->PushString(relPath.string().c_str());
+				onModified->Execute(nullptr);
+			}
 		}
+
+		if (event.flags & kRenamed)
+		{
+			if (onRenamed && onRenamed->IsRunnable())
+			{
+				auto relPath = fs::path(event.path).lexically_relative(g_pSM->GetGamePath() / gamePath);
+				auto relLastPath = fs::path(event.lastPath).lexically_relative(g_pSM->GetGamePath() / gamePath);
+
+				onRenamed->PushCell(handle);
+				onRenamed->PushString(relLastPath.string().c_str());
+				onRenamed->PushString(relPath.string().c_str());
+				onRenamed->Execute(nullptr);
+			}
+		}
+
+		break;
+	}
 	}
 }
 
 SMDirectoryWatcherManager g_FileSystemWatchers;
 SourceMod::HandleType_t SMDirectoryWatcherManager::m_HandleType(0);
 
-SMDirectoryWatcherManager::SMDirectoryWatcherManager()
-{
-}
+SMDirectoryWatcherManager::SMDirectoryWatcherManager() {}
 
 static void GameFrameHook(bool simulating)
 {
 	g_FileSystemWatchers.OnGameFrame(simulating);
 }
 
-bool SMDirectoryWatcherManager::SDK_OnLoad(char* error, int errorSize)
+bool SMDirectoryWatcherManager::SDK_OnLoad(char *error, int errorSize)
 {
-	m_HandleType = g_pHandleSys->CreateType("FileSystemWatcher", this, 0, nullptr, nullptr, myself->GetIdentity(), nullptr);
+	m_HandleType =
+		g_pHandleSys->CreateType("FileSystemWatcher", this, 0, nullptr, nullptr,
+								 myself->GetIdentity(), nullptr);
 	if (!m_HandleType)
 	{
-		std::snprintf(error, errorSize, "Failed to create FileSystemWatcher handle type.");
+		std::snprintf(error, errorSize,
+					  "Failed to create FileSystemWatcher handle type.");
 		return false;
 	}
 
@@ -233,29 +251,36 @@ void SMDirectoryWatcherManager::OnGameFrame(bool simulating)
 	}
 }
 
-SourceMod::Handle_t SMDirectoryWatcherManager::CreateWatcher(SourcePawn::IPluginContext* context, const std::string &path)
+SourceMod::Handle_t SMDirectoryWatcherManager::CreateWatcher(
+	SourcePawn::IPluginContext *context,
+	const std::string &path)
 {
-	SMDirectoryWatcher* watcher = new SMDirectoryWatcher(path);
-	watcher->m_owningContext = context;
-	watcher->m_Handle = handlesys->CreateHandle(m_HandleType, watcher, context->GetIdentity(), myself->GetIdentity(), nullptr);
+	SMDirectoryWatcher *watcher = new SMDirectoryWatcher(path);
+	watcher->owningContext = context;
+	watcher->handle =
+		handlesys->CreateHandle(m_HandleType, watcher, context->GetIdentity(),
+								myself->GetIdentity(), nullptr);
 	m_watchers.push_back(watcher);
-	return watcher->m_Handle;
+	return watcher->handle;
 }
 
-SMDirectoryWatcher* SMDirectoryWatcherManager::GetWatcher(SourceMod::Handle_t handle)
+SMDirectoryWatcher *SMDirectoryWatcherManager::GetWatcher(
+	SourceMod::Handle_t handle)
 {
-	SMDirectoryWatcher* watcher = nullptr;
+	SMDirectoryWatcher *watcher = nullptr;
 	HandleSecurity sec(nullptr, myself->GetIdentity());
 
-	SourceMod::HandleError err = g_pHandleSys->ReadHandle(handle, m_HandleType, &sec, (void**)(&watcher));
+	SourceMod::HandleError err =
+		g_pHandleSys->ReadHandle(handle, m_HandleType, &sec, (void **)(&watcher));
 	return (err == HandleError_None) ? watcher : nullptr;
 }
 
-void SMDirectoryWatcherManager::OnHandleDestroy(SourceMod::HandleType_t type, void *object)
+void SMDirectoryWatcherManager::OnHandleDestroy(SourceMod::HandleType_t type,
+												void *object)
 {
 	if (type == m_HandleType)
 	{
-		SMDirectoryWatcher* watcher = (SMDirectoryWatcher*)object;
+		SMDirectoryWatcher *watcher = (SMDirectoryWatcher *)object;
 
 		for (auto it = m_watchers.begin(); it != m_watchers.end();)
 		{
@@ -273,7 +298,7 @@ void SMDirectoryWatcherManager::OnHandleDestroy(SourceMod::HandleType_t type, vo
 	}
 }
 
-void SMDirectoryWatcherManager::OnPluginUnloaded(SourceMod::IPlugin* plugin)
+void SMDirectoryWatcherManager::OnPluginUnloaded(SourceMod::IPlugin *plugin)
 {
 	for (auto it = m_watchers.begin(); it != m_watchers.end(); it++)
 	{
@@ -281,9 +306,10 @@ void SMDirectoryWatcherManager::OnPluginUnloaded(SourceMod::IPlugin* plugin)
 	}
 }
 
-cell_t Native_FileSystemWatcher(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_FileSystemWatcher(SourcePawn::IPluginContext *context,
+							 const cell_t *params)
 {
-	char* _path = nullptr;
+	char *_path = nullptr;
 	context->LocalToString(params[1], &_path);
 
 	std::string path(_path);
@@ -291,71 +317,105 @@ cell_t Native_FileSystemWatcher(SourcePawn::IPluginContext *context, const cell_
 	return g_FileSystemWatchers.CreateWatcher(context, path);
 }
 
-cell_t Native_FileSystemWatcher_IncludeSubdirectoriesGet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_IncludeSubdirGet(SourcePawn::IPluginContext *context,
+							const cell_t *params)
 {
-	SMDirectoryWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+	SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
 	if (!watcher)
 	{
 		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
 		return 0;
 	}
 
-	return watcher->m_includeSubdirectories;
+	return watcher->options.subtree;
 }
 
-cell_t Native_FileSystemWatcher_IncludeSubdirectoriesSet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_IncludeSubdirSet(SourcePawn::IPluginContext *context,
+							const cell_t *params)
 {
-	SMDirectoryWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+	SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
 	if (!watcher)
 	{
 		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
 		return 0;
 	}
 
-	watcher->m_includeSubdirectories = params[2] != 0;
+	watcher->options.subtree = params[2] != 0;
 	return 0;
 }
 
-cell_t Native_FileSystemWatcher_NotifyFilterGet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_WatchSymLinksGet(SourcePawn::IPluginContext *context,
+							const cell_t *params)
 {
-	SMDirectoryWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+	SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
 	if (!watcher)
 	{
 		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
 		return 0;
 	}
 
-	return (cell_t)watcher->m_notifyFilter;
+	return watcher->options.symlinks;
 }
 
-cell_t Native_FileSystemWatcher_NotifyFilterSet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_WatchSymLinksSet(SourcePawn::IPluginContext *context,
+							const cell_t *params)
 {
-	SMDirectoryWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+	SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
 	if (!watcher)
 	{
 		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
 		return 0;
 	}
 
-	watcher->m_notifyFilter = (DirectoryWatcher::NotifyFilters)params[2];
+	watcher->options.symlinks = params[2] != 0;
 	return 0;
 }
 
-cell_t Native_FileSystemWatcher_RetryIntervalGet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_NotifyFilterGet(SourcePawn::IPluginContext *context,
+						   const cell_t *params)
 {
-	SMDirectoryWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+	SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
 	if (!watcher)
 	{
 		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
 		return 0;
 	}
 
-	return watcher->m_retryInterval;
+	return (cell_t)watcher->options.notifyFilterFlags;
 }
 
-cell_t Native_FileSystemWatcher_RetryIntervalSet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_NotifyFilterSet(SourcePawn::IPluginContext *context,
+						   const cell_t *params)
 {
-	SMDirectoryWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+	SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+	if (!watcher)
+	{
+		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
+		return 0;
+	}
+
+	watcher->options.notifyFilterFlags =
+		(DirectoryWatcher::NotifyFilterFlags)params[2];
+	return 0;
+}
+
+cell_t smn_RetryIntervalGet(SourcePawn::IPluginContext *context,
+							const cell_t *params)
+{
+	SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+	if (!watcher)
+	{
+		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
+		return 0;
+	}
+
+	return watcher->options.retryInterval;
+}
+
+cell_t smn_RetryIntervalSet(SourcePawn::IPluginContext *context,
+							const cell_t *params)
+{
+	SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
 	if (!watcher)
 	{
 		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
@@ -369,158 +429,167 @@ cell_t Native_FileSystemWatcher_RetryIntervalSet(SourcePawn::IPluginContext *con
 		return 0;
 	}
 
-	watcher->m_retryInterval = retryInterval;
+	watcher->options.retryInterval = retryInterval;
 	return 0;
 }
 
-cell_t Native_FileSystemWatcher_InternalBufferSizeGet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_InternalBufferSizeGet(SourcePawn::IPluginContext *context,
+								 const cell_t *params)
 {
-	SMDirectoryWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+	SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
 	if (!watcher)
 	{
 		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
 		return 0;
 	}
 
-	return (cell_t)watcher->m_bufferSize;
+	return (cell_t)watcher->options.bufferSize;
 }
 
-cell_t Native_FileSystemWatcher_InternalBufferSizeSet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_InternalBufferSizeSet(SourcePawn::IPluginContext *context,
+								 const cell_t *params)
 {
-	SMDirectoryWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+	SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
 	if (!watcher)
 	{
 		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
 		return 0;
 	}
 
-	watcher->m_bufferSize = params[2];
+	watcher->options.bufferSize = params[2];
 	return 0;
 }
 
-cell_t Native_FileSystemWatcher_OnStartedSet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_OnStartedSet(SourcePawn::IPluginContext *context,
+						const cell_t *params)
 {
-	SMDirectoryWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+	SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
 	if (!watcher)
 	{
 		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
 		return 0;
 	}
 
-	SourcePawn::IPluginFunction* cb = context->GetFunctionById(params[2]);
+	SourcePawn::IPluginFunction *cb = context->GetFunctionById(params[2]);
 	if (!cb && params[2] != -1)
 	{
 		context->ReportError("Invalid function id %x", params[2]);
 		return 0;
 	}
 
-	watcher->m_onStarted = cb;
+	watcher->onStarted = cb;
 	return 0;
 }
 
-cell_t Native_FileSystemWatcher_OnStoppedSet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_OnStoppedSet(SourcePawn::IPluginContext *context,
+						const cell_t *params)
 {
-	SMDirectoryWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+	SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
 	if (!watcher)
 	{
 		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
 		return 0;
 	}
 
-	SourcePawn::IPluginFunction* cb = context->GetFunctionById(params[2]);
+	SourcePawn::IPluginFunction *cb = context->GetFunctionById(params[2]);
 	if (!cb && params[2] != -1)
 	{
 		context->ReportError("Invalid function id %x", params[2]);
 		return 0;
 	}
 
-	watcher->m_onStopped = cb;
+	watcher->onStopped = cb;
 	return 0;
 }
 
-cell_t Native_FileSystemWatcher_OnCreatedSet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_OnCreatedSet(SourcePawn::IPluginContext *context,
+						const cell_t *params)
 {
-	SMDirectoryWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+	SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
 	if (!watcher)
 	{
 		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
 		return 0;
 	}
 
-	SourcePawn::IPluginFunction* cb = context->GetFunctionById(params[2]);
+	SourcePawn::IPluginFunction *cb = context->GetFunctionById(params[2]);
 	if (!cb && params[2] != -1)
 	{
 		context->ReportError("Invalid function id %x", params[2]);
 		return 0;
 	}
 
-	watcher->m_onCreated = cb;
+	watcher->onCreated = cb;
 	return 0;
 }
 
-cell_t Native_FileSystemWatcher_OnDeletedSet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_OnDeletedSet(SourcePawn::IPluginContext *context,
+						const cell_t *params)
 {
-	SMDirectoryWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+	SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
 	if (!watcher)
 	{
 		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
 		return 0;
 	}
 
-	SourcePawn::IPluginFunction* cb = context->GetFunctionById(params[2]);
+	SourcePawn::IPluginFunction *cb = context->GetFunctionById(params[2]);
 	if (!cb && params[2] != -1)
 	{
 		context->ReportError("Invalid function id %x", params[2]);
 		return 0;
 	}
 
-	watcher->m_onDeleted = cb;
+	watcher->onDeleted = cb;
 	return 0;
 }
 
-cell_t Native_FileSystemWatcher_OnModifiedSet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_OnModifiedSet(SourcePawn::IPluginContext *context,
+						 const cell_t *params)
 {
-	SMDirectoryWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+	SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
 	if (!watcher)
 	{
 		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
 		return 0;
 	}
 
-	SourcePawn::IPluginFunction* cb = context->GetFunctionById(params[2]);
+	SourcePawn::IPluginFunction *cb = context->GetFunctionById(params[2]);
 	if (!cb && params[2] != -1)
 	{
 		context->ReportError("Invalid function id %x", params[2]);
 		return 0;
 	}
 
-	watcher->m_onModified = cb;
+	watcher->onModified = cb;
 	return 0;
 }
 
-cell_t Native_FileSystemWatcher_OnRenamedSet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_OnRenamedSet(SourcePawn::IPluginContext *context,
+						const cell_t *params)
 {
-	SMDirectoryWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+	SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
 	if (!watcher)
 	{
 		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
 		return 0;
 	}
 
-	SourcePawn::IPluginFunction* cb = context->GetFunctionById(params[2]);
+	SourcePawn::IPluginFunction *cb = context->GetFunctionById(params[2]);
 	if (!cb && params[2] != -1)
 	{
 		context->ReportError("Invalid function id %x", params[2]);
 		return 0;
 	}
 
-	watcher->m_onRenamed = cb;
+	watcher->onRenamed = cb;
 	return 0;
 }
 
-cell_t Native_FileSystemWatcher_IsWatchingGet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_IsWatchingGet(SourcePawn::IPluginContext *context,
+						 const cell_t *params)
 {
-	SMDirectoryWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+	SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
 	if (!watcher)
 	{
 		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
@@ -530,9 +599,10 @@ cell_t Native_FileSystemWatcher_IsWatchingGet(SourcePawn::IPluginContext *contex
 	return watcher->IsWatching();
 }
 
-cell_t Native_FileSystemWatcher_IsWatchingSet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_IsWatchingSet(SourcePawn::IPluginContext *context,
+						 const cell_t *params)
 {
-	SMDirectoryWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+	SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
 	if (!watcher)
 	{
 		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
@@ -553,42 +623,41 @@ cell_t Native_FileSystemWatcher_IsWatchingSet(SourcePawn::IPluginContext *contex
 	return 0;
 }
 
-cell_t Native_FileSystemWatcher_GetPath(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_GetPath(SourcePawn::IPluginContext *context, const cell_t *params)
 {
-	SMDirectoryWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+	SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
 	if (!watcher)
 	{
 		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
 		return 0;
 	}
 
-	char* buffer = nullptr;
-	context->LocalToString(params[2], &buffer);
-
-	int bufferSize = params[3];
-
-	return watcher->GetPath(buffer, bufferSize);
+	size_t writtenBytes;
+	context->StringToLocalUTF8(params[2], params[3],
+							   watcher->gamePath.string().c_str(), &writtenBytes);
+	return writtenBytes;
 }
 
-sp_nativeinfo_s SMDirectoryWatcherManager::m_Natives[] =
-{
-	{"FileSystemWatcher.FileSystemWatcher",	Native_FileSystemWatcher},
-	{"FileSystemWatcher.IsWatching.get", Native_FileSystemWatcher_IsWatchingGet},
-	{"FileSystemWatcher.IsWatching.set", Native_FileSystemWatcher_IsWatchingSet},
-	{"FileSystemWatcher.IncludeSubdirectories.get", Native_FileSystemWatcher_IncludeSubdirectoriesGet},
-	{"FileSystemWatcher.IncludeSubdirectories.set", Native_FileSystemWatcher_IncludeSubdirectoriesSet},
-	{"FileSystemWatcher.NotifyFilter.get", Native_FileSystemWatcher_NotifyFilterGet},
-	{"FileSystemWatcher.NotifyFilter.set", Native_FileSystemWatcher_NotifyFilterSet},
-	{"FileSystemWatcher.RetryInterval.get", Native_FileSystemWatcher_RetryIntervalGet},
-	{"FileSystemWatcher.RetryInterval.set", Native_FileSystemWatcher_RetryIntervalSet},
-	{"FileSystemWatcher.InternalBufferSize.get", Native_FileSystemWatcher_InternalBufferSizeGet},
-	{"FileSystemWatcher.InternalBufferSize.set", Native_FileSystemWatcher_InternalBufferSizeSet},
-	{"FileSystemWatcher.OnStarted.set", Native_FileSystemWatcher_OnStartedSet},
-	{"FileSystemWatcher.OnStopped.set", Native_FileSystemWatcher_OnStoppedSet},
-	{"FileSystemWatcher.OnCreated.set", Native_FileSystemWatcher_OnCreatedSet},
-	{"FileSystemWatcher.OnDeleted.set", Native_FileSystemWatcher_OnDeletedSet},
-	{"FileSystemWatcher.OnModified.set", Native_FileSystemWatcher_OnModifiedSet},
-	{"FileSystemWatcher.OnRenamed.set", Native_FileSystemWatcher_OnRenamedSet},
-	{"FileSystemWatcher.GetPath", Native_FileSystemWatcher_GetPath},
-	{NULL,			NULL},
+sp_nativeinfo_s SMDirectoryWatcherManager::m_Natives[] = {
+	{"FileSystemWatcher.FileSystemWatcher", smn_FileSystemWatcher},
+	{"FileSystemWatcher.IsWatching.get", smn_IsWatchingGet},
+	{"FileSystemWatcher.IsWatching.set", smn_IsWatchingSet},
+	{"FileSystemWatcher.IncludeSubdirectories.get", smn_IncludeSubdirGet},
+	{"FileSystemWatcher.IncludeSubdirectories.set", smn_IncludeSubdirSet},
+	{"FileSystemWatcher.WatchDirectoryLinks.get", smn_WatchSymLinksGet},
+	{"FileSystemWatcher.WatchDirectoryLinks.set", smn_WatchSymLinksSet},
+	{"FileSystemWatcher.NotifyFilter.get", smn_NotifyFilterGet},
+	{"FileSystemWatcher.NotifyFilter.set", smn_NotifyFilterSet},
+	{"FileSystemWatcher.RetryInterval.get", smn_RetryIntervalGet},
+	{"FileSystemWatcher.RetryInterval.set", smn_RetryIntervalSet},
+	{"FileSystemWatcher.InternalBufferSize.get", smn_InternalBufferSizeGet},
+	{"FileSystemWatcher.InternalBufferSize.set", smn_InternalBufferSizeSet},
+	{"FileSystemWatcher.OnStarted.set", smn_OnStartedSet},
+	{"FileSystemWatcher.OnStopped.set", smn_OnStoppedSet},
+	{"FileSystemWatcher.OnCreated.set", smn_OnCreatedSet},
+	{"FileSystemWatcher.OnDeleted.set", smn_OnDeletedSet},
+	{"FileSystemWatcher.OnModified.set", smn_OnModifiedSet},
+	{"FileSystemWatcher.OnRenamed.set", smn_OnRenamedSet},
+	{"FileSystemWatcher.GetPath", smn_GetPath},
+	{NULL, NULL},
 };

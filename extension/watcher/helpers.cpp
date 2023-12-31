@@ -8,7 +8,7 @@
  * This program is free software; you can redistribute it and/or modify it under
  * the terms of the GNU General Public License, version 3.0, as published by the
  * Free Software Foundation.
- * 
+ *
  * This program is distributed in the hope that it will be useful, but WITHOUT
  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
  * FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
@@ -29,13 +29,29 @@
 
 #include "helpers.h"
 
-std::string GetFileNameFromPath(const std::string &path)
-{
-	size_t slash_pos = path.find_last_of("\\/");
-	if (slash_pos == std::string::npos)
-	{
-		return std::string(path);
-	}
+#ifdef __linux__
+#else
+#endif
 
-	return path.substr(slash_pos + 1);
+#ifdef __linux__
+#else
+
+ScopedHandle::ScopedHandle() { ScopedHandle::ScopedHandle(0); }
+ScopedHandle::ScopedHandle(const HANDLE &h) : handle(h) {}
+
+ScopedHandle::~ScopedHandle()
+{
+	if (handle != nullptr && handle != INVALID_HANDLE_VALUE)
+	{
+		CloseHandle(handle);
+	}
 }
+
+ScopedHandle::operator HANDLE() const { return handle; }
+HANDLE ScopedHandle::operator=(const HANDLE &h)
+{
+	handle = h;
+	return handle;
+}
+
+#endif
