@@ -78,7 +78,7 @@ public:
     void SDK_OnUnload();
     void OnGameFrame(bool simulating);
 
-    SourceMod::Handle_t CreateWatcher(SourcePawn::IPluginContext *context, const std::string &path);
+    SourceMod::Handle_t CreateWatcher(SourcePawn::IPluginContext *context, const std::filesystem::path &path);
     SMDirectoryWatcher *GetWatcher(SourceMod::Handle_t handle);
 
     // IHandleTypeDispatch

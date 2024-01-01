@@ -37,7 +37,7 @@ SMDirectoryWatcher::SMDirectoryWatcher(const fs::path &path)
     : DirectoryWatcher(),
       gamePath(fs::path(path).lexically_normal()),
       watching(false),
-      options{false, false, kNone, 8192, 1000},
+      options{false, true, kNone, 8192},
       handle(0),
       owningContext(nullptr),
       onStarted(nullptr),
@@ -152,10 +152,10 @@ void SMDirectoryWatcher::OnProcessEvent(const NotifyEvent &event)
         {
             if (onCreated && onCreated->IsRunnable())
             {
-                auto relPath = fs::path(event.path).lexically_relative(g_pSM->GetGamePath() / gamePath);
+                auto relPath = fs::path(event.path).lexically_relative(g_pSM->GetGamePath() / gamePath).string();
 
                 onCreated->PushCell(handle);
-                onCreated->PushString(relPath.string().c_str());
+                onCreated->PushString(relPath.c_str());
                 onCreated->Execute(nullptr);
             }
         }
@@ -164,10 +164,10 @@ void SMDirectoryWatcher::OnProcessEvent(const NotifyEvent &event)
         {
             if (onDeleted && onDeleted->IsRunnable())
             {
-                auto relPath = fs::path(event.path).lexically_relative(g_pSM->GetGamePath() / gamePath);
+                auto relPath = fs::path(event.path).lexically_relative(g_pSM->GetGamePath() / gamePath).string();
 
                 onDeleted->PushCell(handle);
-                onDeleted->PushString(relPath.string().c_str());
+                onDeleted->PushString(relPath.c_str());
                 onDeleted->Execute(nullptr);
             }
         }
@@ -176,10 +176,10 @@ void SMDirectoryWatcher::OnProcessEvent(const NotifyEvent &event)
         {
             if (onModified && onModified->IsRunnable())
             {
-                auto relPath = fs::path(event.path).lexically_relative(g_pSM->GetGamePath() / gamePath);
+                auto relPath = fs::path(event.path).lexically_relative(g_pSM->GetGamePath() / gamePath).string();
 
                 onModified->PushCell(handle);
-                onModified->PushString(relPath.string().c_str());
+                onModified->PushString(relPath.c_str());
                 onModified->Execute(nullptr);
             }
         }
@@ -188,12 +188,12 @@ void SMDirectoryWatcher::OnProcessEvent(const NotifyEvent &event)
         {
             if (onRenamed && onRenamed->IsRunnable())
             {
-                auto relPath = fs::path(event.path).lexically_relative(g_pSM->GetGamePath() / gamePath);
-                auto relLastPath = fs::path(event.lastPath).lexically_relative(g_pSM->GetGamePath() / gamePath);
+                auto relPath = fs::path(event.path).lexically_relative(g_pSM->GetGamePath() / gamePath).string();
+                auto relLastPath = fs::path(event.lastPath).lexically_relative(g_pSM->GetGamePath() / gamePath).string();
 
                 onRenamed->PushCell(handle);
-                onRenamed->PushString(relLastPath.string().c_str());
-                onRenamed->PushString(relPath.string().c_str());
+                onRenamed->PushString(relLastPath.c_str());
+                onRenamed->PushString(relPath.c_str());
                 onRenamed->Execute(nullptr);
             }
         }
@@ -256,7 +256,7 @@ void SMDirectoryWatcherManager::OnGameFrame(bool simulating)
 
 SourceMod::Handle_t SMDirectoryWatcherManager::CreateWatcher(
     SourcePawn::IPluginContext *context,
-    const std::string &path)
+    const fs::path &path)
 {
     SMDirectoryWatcher *watcher = new SMDirectoryWatcher(path);
     watcher->owningContext = context;
@@ -315,7 +315,12 @@ cell_t smn_FileSystemWatcher(SourcePawn::IPluginContext *context,
     char *_path = nullptr;
     context->LocalToString(params[1], &_path);
 
-    std::string path(_path);
+    fs::path path = fs::path(_path).lexically_normal();
+    if (!path.empty() && *path.begin() == "..")
+    {
+        context->ReportError("Path \"%s\" is invalid: path must be within the game directory", path.string().c_str());
+        return 0;
+    }
 
     return g_FileSystemWatchers.CreateWatcher(context, path);
 }
@@ -405,34 +410,12 @@ cell_t smn_NotifyFilterSet(SourcePawn::IPluginContext *context,
 cell_t smn_RetryIntervalGet(SourcePawn::IPluginContext *context,
                             const cell_t *params)
 {
-    SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
-    if (!watcher)
-    {
-        context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
-        return 0;
-    }
-
-    return watcher->options.retryInterval;
+    return 0;
 }
 
 cell_t smn_RetryIntervalSet(SourcePawn::IPluginContext *context,
                             const cell_t *params)
 {
-    SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
-    if (!watcher)
-    {
-        context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
-        return 0;
-    }
-
-    int retryInterval = params[2];
-    if (retryInterval < 0)
-    {
-        context->ReportError("RetryInterval cannot be negative");
-        return 0;
-    }
-
-    watcher->options.retryInterval = retryInterval;
     return 0;
 }
 
@@ -636,8 +619,7 @@ cell_t smn_GetPath(SourcePawn::IPluginContext *context, const cell_t *params)
     }
 
     size_t writtenBytes;
-    context->StringToLocalUTF8(params[2], params[3],
-                               watcher->gamePath.string().c_str(), &writtenBytes);
+    context->StringToLocalUTF8(params[2], params[3], watcher->gamePath.string().c_str(), &writtenBytes);
     return writtenBytes;
 }
 

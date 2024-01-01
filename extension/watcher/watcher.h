@@ -64,7 +64,6 @@ public:
         bool symlinks;
         NotifyFilterFlags notifyFilterFlags;
         size_t bufferSize;
-        int retryInterval;
     };
 
     enum NotifyEventType

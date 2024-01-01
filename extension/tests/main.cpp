@@ -1,108 +1,106 @@
+/**
+ * vim: set ts=4 :
+ * =============================================================================
+ * FileWatcher Extension
+ * Copyright (C) 2022 KitRifty  All rights reserved.
+ * =============================================================================
+ *
+ * This program is free software; you can redistribute it and/or modify it under
+ * the terms of the GNU General Public License, version 3.0, as published by the
+ * Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+ * details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * As a special exception, AlliedModders LLC gives you permission to link the
+ * code of this program (as well as its derivative works) to "Half-Life 2," the
+ * "Source Engine," the "SourcePawn JIT," and any Game MODs that run on software
+ * by the Valve Corporation.  You must obey the GNU General Public License in
+ * all respects for all other code used.  Additionally, AlliedModders LLC grants
+ * this exception to all derivative works.  AlliedModders LLC defines further
+ * exceptions, found in LICENSE.txt (as of this writing, version JULY-31-2007),
+ * or <http://www.sourcemod.net/license.php>.
+ */
 
 #include <iostream>
 #include <fstream>
 #include <filesystem>
-#include <shared_mutex>
-#include "watcher.h"
+#include <random>
+#include <sstream>
+#include <gtest/gtest.h>
+#include "runner.h"
 
 namespace fs = std::filesystem;
 
-class TestWatcher : public DirectoryWatcher
+void WatchEventCollector::OnProcessEvent(const NotifyEvent &event)
 {
-public:
-    using DirectoryWatcher::DirectoryWatcher;
+    events.emplace_back(event);
+}
 
-    fs::path basePath;
+std::string generate_random_string(size_t length)
+{
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    static const std::string chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+    std::uniform_int_distribution<> distribution(0, chars.size() - 1);
 
-    virtual void OnProcessEvent(const NotifyEvent &event) override
+    std::string result;
+    result.reserve(length);
+    for (size_t i = 0; i < length; ++i)
     {
-        switch (event.type)
-        {
-        case kFilesystem:
-        {
-            if (event.flags & kCreated)
-            {
-                std::cout << "Created " << fs::path(event.path).lexically_relative(basePath) << std::endl;
-            }
-
-            if (event.flags & kDeleted)
-            {
-                std::cout << "Deleted " << fs::path(event.path).lexically_relative(basePath) << std::endl;
-            }
-
-            if (event.flags & kModified)
-            {
-                std::cout << "Modified " << fs::path(event.path).lexically_relative(basePath) << std::endl;
-            }
-
-            if (event.flags & kRenamed)
-            {
-                std::cout << "Renamed " << fs::path(event.lastPath).lexically_relative(basePath) << " to " << fs::path(event.path).lexically_relative(basePath) << std::endl;
-            }
-            break;
-        }
-        case kStart:
-        {
-            if (event.path == basePath)
-            {
-                std::cout << "Started watching" << std::endl;
-            }
-
-            break;
-        }
-        case kStop:
-        {
-            if (event.path == basePath)
-            {
-                std::cout << "Stopped watching" << std::endl;
-            }
-
-            break;
-        }
-        }
+        result += chars[distribution(gen)];
     }
-};
+    return result;
+}
 
-class TempDir
+TempDir::TempDir()
 {
-public:
-#ifdef __linux__
-    TempDir()
-    {
-        char temp[] = "/tmp/watchertestXXXXXX";
-        char *p = mkdtemp(temp);
+#ifdef __linux
+    char temp[] = "/tmp/watchertestXXXXXX";
+    char *p = mkdtemp(temp);
 
-        if (p != nullptr)
-        {
-            path = p;
-        }
+    if (p != nullptr)
+    {
+        path = p;
     }
 #else
-    TempDir(const fs::path &filename) : path(filename)
+    fs::path tempDir;
+    while (true)
     {
-        if (IsSubPath(fs::temp_directory_path(), filename) && fs::create_directories(filename))
+        tempDir = fs::temp_directory_path() / ("watchertest" + generate_random_string(6));
+        if (!fs::exists(tempDir))
         {
-            path = filename;
-        }
-        else
-        {
-            std::cerr << "Failed to create directory " << filename << std::endl;
-            exit(1);
+            if (fs::create_directories(tempDir))
+            {
+                path = tempDir;
+            }
+
+            break;
         }
     }
 #endif
+}
 
-    ~TempDir()
+TempDir::~TempDir()
+{
+    if (!path.empty())
     {
-        if (!path.empty())
-        {
-            fs::remove_all(path);
-        }
+        fs::remove_all(path);
     }
+}
 
-    fs::path path;
-};
+int main(int argc, char **argv)
+{
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
+}
 
+/*
 int main()
 {
 #ifdef __linux__
@@ -182,11 +180,7 @@ int main()
     options.subtree = true;
     options.symlinks = true;
     options.bufferSize = 8192;
-    options.retryInterval = 1000;
     options.notifyFilterFlags = DirectoryWatcher::kNotifyAll;
-
-    TestWatcher watcher;
-    watcher.basePath = watchedDir.path;
 
     if (!watcher.Watch(watchedDir.path, options))
     {
@@ -252,3 +246,4 @@ int main()
 
     return 0;
 }
+*/

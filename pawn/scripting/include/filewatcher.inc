@@ -86,7 +86,7 @@ methodmap FileSystemWatcher < Handle
 	/**
 	 * If IncludeSubdirectories is true, then this sets whether directory
 	 * symbolic links within the watched directory should also be
-	 * watched. By default this is false.
+	 * watched. By default this is true.
 	 */
 	property bool WatchDirectoryLinks
 	{
@@ -104,8 +104,7 @@ methodmap FileSystemWatcher < Handle
 	}
 
 	/**
-	 * If watching fails (such as directory being deleted or renamed), the watcher
-	 * will auto-retry every x milliseconds until it succeeds.
+	 * Deprecated. Does nothing.
 	 */
 	property int RetryInterval
 	{
@@ -197,14 +196,13 @@ methodmap FileSystemWatcher < Handle
 	 * changes.
 	 *
 	 * @param path    Path to directory. This path is relative to the game directory.
+	 * @error         Path points to a directory outside of the game directory.
 	 */
 	public native FileSystemWatcher(const char[] path = "");
 
 	/**
 	 * Retrieves the path of the watched directory, relative to the game directory.
 	 *
-	 * @note                This will always be trailed with the OS's preferred path separator
-	 *                      ("\\" for Windows, "/" for Linux).
 	 * @param buffer        Buffer to store the path.
 	 * @param bufferSize    Size of buffer.
 	 * @return              Number of bytes written.

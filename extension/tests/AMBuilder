@@ -4,7 +4,10 @@ import os
 projectName = 'tests'
 
 sourceFiles = [
-    'main.cpp'
+    'main.cpp',
+    'test-directory.cpp',
+    'test-file.cpp',
+    'test-symlinks.cpp'
 ]
 
 rvalue = {}
@@ -12,14 +15,35 @@ rvalue = {}
 for cxx in builder.targets:
     arch = cxx.target.arch
 
-    binary = Extension.Program(builder, cxx, 'tests')
+    binary = Extension.StaticLibrary(builder, cxx, 'libgtest')
+    binary.compiler.includes += [
+        os.path.join(builder.currentSourcePath,
+                     'googletests', 'googletest', 'include'),
+        os.path.join(builder.currentSourcePath, 'googletests', 'googletest')
+    ]
+    binary.sources += [
+        os.path.join(builder.currentSourcePath, 'googletests',
+                     'googletest', 'src', 'gtest-all.cc'),
+    ]
+    libgtest = builder.Add(binary)
+
+    binary = Extension.Program(builder, cxx, 'testrunner')
     binary.sources += sourceFiles
     binary.compiler.cxxincludes += [
-      os.path.join(builder.currentSourcePath, '../watcher')
+        os.path.join(builder.currentSourcePath,
+                     'googletests', 'googletest', 'include'),
+
+        os.path.join(builder.currentSourcePath, '../watcher')
     ]
 
+    if binary.compiler.like('msvc'):
+        binary.compiler.linkflags.append('/SUBSYSTEM:CONSOLE')
+    if cxx.target.platform == 'linux':
+        binary.compiler.linkflags.append('-ldl')
+
     binary.compiler.postlink += [
-        Extension.watcher_lib[arch]
+        libgtest.binary,
+        Extension.libwatcher[arch]
     ]
 
     task = builder.Add(binary)
