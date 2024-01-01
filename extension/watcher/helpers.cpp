@@ -41,17 +41,17 @@ ScopedHandle::ScopedHandle(const HANDLE &h) : handle(h) {}
 
 ScopedHandle::~ScopedHandle()
 {
-	if (handle != nullptr && handle != INVALID_HANDLE_VALUE)
-	{
-		CloseHandle(handle);
-	}
+    if (handle != nullptr && handle != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(handle);
+    }
 }
 
 ScopedHandle::operator HANDLE() const { return handle; }
 HANDLE ScopedHandle::operator=(const HANDLE &h)
 {
-	handle = h;
-	return handle;
+    handle = h;
+    return handle;
 }
 
 #endif

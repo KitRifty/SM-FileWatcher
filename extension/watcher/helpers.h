@@ -35,6 +35,14 @@
 #include <Windows.h>
 #endif
 
+#include <filesystem>
+
+inline bool IsSubPath(const std::filesystem::path &base, const std::filesystem::path &child)
+{
+	auto relative = child.lexically_relative(base);
+	return !relative.empty() && *relative.begin() != "..";
+}
+
 #ifdef __linux__
 #else
 

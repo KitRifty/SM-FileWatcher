@@ -38,60 +38,60 @@
 class SMDirectoryWatcher : public DirectoryWatcher
 {
 public:
-	SMDirectoryWatcher(const std::filesystem::path &relPath);
-	inline bool IsWatching() const { return watching; }
-	bool Start();
-	void Stop();
+    SMDirectoryWatcher(const std::filesystem::path &relPath);
+    inline bool IsWatching() const { return watching; }
+    bool Start();
+    void Stop();
 
-	virtual void OnProcessEvent(const NotifyEvent &event) override;
+    virtual void OnProcessEvent(const NotifyEvent &event) override;
 
 private:
-	void OnGameFrame(bool simulating);
-	void OnPluginUnloaded(SourceMod::IPlugin *plugin);
+    void OnGameFrame(bool simulating);
+    void OnPluginUnloaded(SourceMod::IPlugin *plugin);
 
-	friend class SMDirectoryWatcherManager;
+    friend class SMDirectoryWatcherManager;
 
 public:
-	const std::filesystem::path gamePath;
-	bool watching;
+    const std::filesystem::path gamePath;
+    bool watching;
 
-	WatchOptions options;
+    WatchOptions options;
 
-	SourceMod::Handle_t handle;
+    SourceMod::Handle_t handle;
 
-	SourcePawn::IPluginContext *owningContext;
-	SourcePawn::IPluginFunction *onStarted;
-	SourcePawn::IPluginFunction *onStopped;
-	SourcePawn::IPluginFunction *onCreated;
-	SourcePawn::IPluginFunction *onDeleted;
-	SourcePawn::IPluginFunction *onModified;
-	SourcePawn::IPluginFunction *onRenamed;
+    SourcePawn::IPluginContext *owningContext;
+    SourcePawn::IPluginFunction *onStarted;
+    SourcePawn::IPluginFunction *onStopped;
+    SourcePawn::IPluginFunction *onCreated;
+    SourcePawn::IPluginFunction *onDeleted;
+    SourcePawn::IPluginFunction *onModified;
+    SourcePawn::IPluginFunction *onRenamed;
 };
 
 class SMDirectoryWatcherManager : public SourceMod::IHandleTypeDispatch,
-								  public SourceMod::IPluginsListener
+                                  public SourceMod::IPluginsListener
 {
 public:
-	SMDirectoryWatcherManager();
+    SMDirectoryWatcherManager();
 
-	bool SDK_OnLoad(char *error, int errorSize);
-	void SDK_OnUnload();
-	void OnGameFrame(bool simulating);
+    bool SDK_OnLoad(char *error, int errorSize);
+    void SDK_OnUnload();
+    void OnGameFrame(bool simulating);
 
-	SourceMod::Handle_t CreateWatcher(SourcePawn::IPluginContext *context, const std::string &path);
-	SMDirectoryWatcher *GetWatcher(SourceMod::Handle_t handle);
+    SourceMod::Handle_t CreateWatcher(SourcePawn::IPluginContext *context, const std::string &path);
+    SMDirectoryWatcher *GetWatcher(SourceMod::Handle_t handle);
 
-	// IHandleTypeDispatch
-	virtual void OnHandleDestroy(SourceMod::HandleType_t type, void *object) override;
+    // IHandleTypeDispatch
+    virtual void OnHandleDestroy(SourceMod::HandleType_t type, void *object) override;
 
-	// IPluginsListener
-	virtual void OnPluginUnloaded(SourceMod::IPlugin *plugin) override;
+    // IPluginsListener
+    virtual void OnPluginUnloaded(SourceMod::IPlugin *plugin) override;
 
 private:
-	static SourceMod::HandleType_t m_HandleType;
-	static sp_nativeinfo_t m_Natives[];
+    static SourceMod::HandleType_t m_HandleType;
+    static sp_nativeinfo_t m_Natives[];
 
-	std::vector<SMDirectoryWatcher *> m_watchers;
+    std::vector<SMDirectoryWatcher *> m_watchers;
 };
 
 extern SMDirectoryWatcherManager g_FileSystemWatchers;

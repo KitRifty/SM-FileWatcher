@@ -45,1065 +45,600 @@
 namespace fs = std::filesystem;
 
 DirectoryWatcher::Worker::Worker(
-	const std::filesystem::path &path,
-	const WatchOptions &_options,
-	EventQueue *eventsBuffer,
-	std::mutex *eventsBufferMutex) : eventsBuffer(eventsBuffer),
-									 eventsBufferMutex(eventsBufferMutex),
-									 basePath(path),
-									 options(_options)
+    const std::filesystem::path &path,
+    const WatchOptions &_options,
+    EventQueue *eventsBuffer,
+    std::mutex *eventsBufferMutex) : basePath(path.lexically_normal()),
+                                     eventsBuffer(eventsBuffer),
+                                     eventsBufferMutex(eventsBufferMutex),
+                                     options(_options)
 {
 #ifdef __linux__
+    fileDescriptor = inotify_init1(IN_NONBLOCK);
+    cancelEvent = eventfd(0, 0);
+
+    if (fileDescriptor != -1)
+    {
+        AddDirectory(basePath);
+    }
+
+    thread = std::thread(&DirectoryWatcher::Worker::ThreadProc, this);
+
 #else
-	auto actualBasePath = fs::path(basePath);
-	if (fs::is_symlink(actualBasePath))
-	{
-		actualBasePath = fs::read_symlink(actualBasePath);
-	}
+    auto actualBasePath = fs::path(basePath);
+    if (fs::is_symlink(actualBasePath))
+    {
+        actualBasePath = fs::read_symlink(actualBasePath);
+    }
 
-	directory = CreateFileA(
-		actualBasePath.string().c_str(),
-		FILE_LIST_DIRECTORY | GENERIC_READ,
-		FILE_SHARE_READ | FILE_SHARE_WRITE,
-		nullptr,
-		OPEN_EXISTING,
-		FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
-		nullptr);
+    directory = CreateFileA(
+        actualBasePath.string().c_str(),
+        FILE_LIST_DIRECTORY | GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+        nullptr);
 
-	if (directory == INVALID_HANDLE_VALUE)
-	{
-		cancelEvent = 0;
-		return;
-	}
+    if (directory == INVALID_HANDLE_VALUE)
+    {
+        cancelEvent = 0;
+        return;
+    }
+
+    cancelEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+
+    if (options.subtree)
+    {
+        if (options.symlinks)
+        {
+            std::queue<fs::path> dirsToTraverse;
+            dirsToTraverse.push(basePath);
+
+            while (!dirsToTraverse.empty())
+            {
+                fs::path currentDir = dirsToTraverse.front();
+                dirsToTraverse.pop();
+
+                for (const auto &entry : fs::directory_iterator(currentDir))
+                {
+                    if (fs::is_directory(entry))
+                    {
+                        if (fs::is_symlink(entry))
+                        {
+                            workers.push_back(std::make_unique<Worker>(fs::path(entry), options, eventsBuffer, eventsBufferMutex));
+                        }
+                        else
+                        {
+                            dirsToTraverse.push(entry);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    thread = std::thread(&DirectoryWatcher::Worker::ThreadProc, this);
 #endif
-
-	if (options.subtree)
-	{
-#ifdef __linux__
-#else
-		if (options.symlinks)
-		{
-			std::queue<fs::path> dirsToTraverse;
-			dirsToTraverse.push(basePath);
-
-			while (!dirsToTraverse.empty())
-			{
-				fs::path currentDir = dirsToTraverse.front();
-				dirsToTraverse.pop();
-
-				for (const auto &entry : fs::directory_iterator(currentDir))
-				{
-					if (fs::is_directory(entry))
-					{
-						if (fs::is_symlink(entry))
-						{
-							workers.push_back(std::make_unique<Worker>(fs::path(entry), options, eventsBuffer, eventsBufferMutex));
-						}
-						else
-						{
-							dirsToTraverse.push(entry);
-						}
-					}
-				}
-			}
-		}
-#endif
-	}
-
-#ifdef __linux__
-#else
-	cancelEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
-#endif
-
-	thread = std::thread(&DirectoryWatcher::Worker::ThreadProc, this);
 }
 
 DirectoryWatcher::Worker::~Worker()
 {
-	workers.clear();
-
 #ifdef __linux__
 #else
-	SetEvent(cancelEvent);
+    workers.clear();
 #endif
 
-	if (thread.joinable())
-	{
-		thread.join();
-	}
+#ifdef __linux__
+    uint64_t u = 1;
+    write(cancelEvent, &u, sizeof(u));
+#else
+    SetEvent(cancelEvent);
+#endif
+
+    if (thread.joinable())
+    {
+        thread.join();
+    }
+
+#ifdef __linux__
+    if (fcntl(cancelEvent, F_GETFD) != -1)
+    {
+        close(cancelEvent);
+    }
+
+    if (fcntl(fileDescriptor, F_GETFD) != -1)
+    {
+        for (auto it = watchDescriptors.begin(); it != watchDescriptors.end(); it++)
+        {
+            inotify_rm_watch(fileDescriptor, it->first);
+        }
+
+        close(fileDescriptor);
+    }
+#endif
 }
+
+#ifdef __linux__
+int DirectoryWatcher::Worker::AddDirectory(const std::filesystem::path &path)
+{
+    int wd = inotify_add_watch(fileDescriptor, path.string().c_str(), IN_CREATE | IN_MOVE | IN_DELETE | IN_CLOSE_WRITE | IN_DELETE_SELF | IN_MOVE_SELF);
+    if (wd != -1)
+    {
+        watchDescriptors.insert_or_assign(wd, fs::path(path));
+
+        if (options.subtree)
+        {
+            for (const auto &entry : fs::directory_iterator(path))
+            {
+                if (entry.is_directory())
+                {
+                    if (!options.symlinks && entry.is_symlink())
+                    {
+                        continue;
+                    }
+
+                    AddDirectory(entry);
+                }
+            }
+        }
+    }
+
+    return wd;
+}
+#endif
 
 void DirectoryWatcher::Worker::ThreadProc()
 {
 #ifdef __linux__
+    auto buffer = std::make_unique<char[]>(options.bufferSize);
+
+    pollfd fds[2];
+
+    fds[0].fd = fileDescriptor;
+    fds[0].events = POLLIN;
+
+    fds[1].fd = cancelEvent;
+    fds[1].events = POLLIN;
+
 #else
-	auto buffer = std::make_unique<char[]>(options.bufferSize);
-	ScopedHandle watchEvent(CreateEvent(nullptr, TRUE, FALSE, nullptr));
+    auto buffer = std::make_unique<char[]>(options.bufferSize);
+    ScopedHandle watchEvent(CreateEvent(nullptr, TRUE, FALSE, nullptr));
 
-	HANDLE waitHandles[2];
-	waitHandles[0] = cancelEvent;
-	waitHandles[1] = watchEvent;
+    HANDLE waitHandles[2];
+    waitHandles[0] = cancelEvent;
+    waitHandles[1] = watchEvent;
 
-	OVERLAPPED overlapped;
-	ZeroMemory(&overlapped, sizeof overlapped);
-	overlapped.hEvent = watchEvent;
+    OVERLAPPED overlapped;
+    ZeroMemory(&overlapped, sizeof overlapped);
+    overlapped.hEvent = watchEvent;
 #endif
 
-	bool running = true;
+    {
+        std::lock_guard<std::mutex> lock(*eventsBufferMutex);
 
-	{
-		std::lock_guard<std::mutex> lock(*eventsBufferMutex);
+        auto change = std::make_unique<NotifyEvent>();
+        change->type = kStart;
+        change->path = basePath.string();
 
-		auto change = std::make_unique<NotifyEvent>();
-		change->type = kStart;
-		change->path = basePath.string();
+        eventsBuffer->push(std::move(change));
+    }
 
-		eventsBuffer->push(std::move(change));
-	}
-
-	while (running)
-	{
 #ifdef __linux__
+    while (poll(fds, 2, -1) >= 0)
+    {
+        if (fds[0].revents & POLLERR || fds[1].revents & POLLERR)
+        {
+            break;
+        }
+
+        if (fds[1].revents & POLLIN)
+        {
+            break;
+        }
+
+        if (fds[0].revents & POLLIN)
+        {
+            std::vector<std::unique_ptr<NotifyEvent>> queuedEvents;
+
+            for (;;)
+            {
+                ssize_t len = read(fileDescriptor, buffer.get(), options.bufferSize);
+
+                if (len == -1 && errno != EAGAIN)
+                {
+                    goto end_event_loop;
+                }
+
+                if (len <= 0)
+                {
+                    break;
+                }
+
+                const inotify_event *event;
+                for (char *p = buffer.get(); p < buffer.get() + len; p += sizeof(inotify_event) + event->len)
+                {
+                    event = (const inotify_event *)p;
+
+                    if (event->mask & (IN_MOVE_SELF | IN_DELETE_SELF))
+                    {
+                        auto it = watchDescriptors.find(event->wd);
+                        if (it != watchDescriptors.end())
+                        {
+                            fs::path watchPath(it->second);
+
+                            for (auto jt = watchDescriptors.begin(); jt != watchDescriptors.end(); jt++)
+                            {
+                                if (jt->first == event->wd || IsSubPath(watchPath, jt->second))
+                                {
+                                    inotify_rm_watch(fileDescriptor, jt->first);
+                                    jt = watchDescriptors.erase(jt);
+                                }
+                            }
+                        }
+
+                        continue;
+                    }
+
+                    if (event->mask & IN_IGNORED)
+                    {
+                        continue;
+                    }
+
+                    auto &baseRelPath = watchDescriptors.at(event->wd);
+
+                    if (event->mask & (IN_CREATE | IN_MOVED_TO))
+                    {
+                        if (options.subtree)
+                        {
+                            fs::path relPath = baseRelPath / event->name;
+
+                            if ((event->mask & IN_ISDIR) ||
+                                (options.symlinks && fs::is_symlink(relPath) && fs::is_directory(relPath)))
+                            {
+                                AddDirectory(relPath);
+                            }
+                        }
+
+                        if (event->mask & IN_MOVED_TO)
+                        {
+                            bool foundRenamedEvent = false;
+
+                            for (auto it = queuedEvents.rbegin(); it != queuedEvents.rend(); it++)
+                            {
+                                auto &change = *it;
+                                if (change->cookie == event->cookie)
+                                {
+                                    change->flags = kRenamed;
+                                    change->cookie = 0;
+                                    change->lastPath = change->path;
+                                    change->path = baseRelPath / event->name;
+
+                                    foundRenamedEvent = true;
+                                    break;
+                                }
+                            }
+
+                            if (foundRenamedEvent)
+                            {
+                                continue;
+                            }
+                        }
+
+                        std::unique_ptr<NotifyEvent> change = std::make_unique<NotifyEvent>();
+                        change->type = kFilesystem;
+                        change->flags = kCreated;
+                        change->cookie = event->cookie;
+                        change->path = baseRelPath / event->name;
+
+                        queuedEvents.push_back(std::move(change));
+                    }
+
+                    if (event->mask & (IN_DELETE | IN_MOVED_FROM))
+                    {
+                        if (event->mask & IN_MOVED_FROM)
+                        {
+                            bool foundRenamedEvent = false;
+
+                            for (auto it = queuedEvents.rbegin(); it != queuedEvents.rend(); it++)
+                            {
+                                auto &change = *it;
+                                if (change->cookie == event->cookie)
+                                {
+                                    change->flags = kRenamed;
+                                    change->cookie = 0;
+                                    change->lastPath = change->path;
+                                    change->path = baseRelPath / event->name;
+
+                                    foundRenamedEvent = true;
+                                    break;
+                                }
+                            }
+
+                            if (foundRenamedEvent)
+                            {
+                                continue;
+                            }
+                        }
+
+                        std::unique_ptr<NotifyEvent> change = std::make_unique<NotifyEvent>();
+                        change->type = kFilesystem;
+                        change->flags = kDeleted;
+                        change->cookie = event->cookie;
+                        change->path = baseRelPath / event->name;
+
+                        queuedEvents.push_back(std::move(change));
+                    }
+
+                    if (event->mask & IN_CLOSE_WRITE)
+                    {
+                        std::unique_ptr<NotifyEvent> change = std::make_unique<NotifyEvent>();
+                        change->type = kFilesystem;
+                        change->flags = kModified;
+                        change->cookie = event->cookie;
+                        change->path = baseRelPath / event->name;
+
+                        queuedEvents.push_back(std::move(change));
+                    }
+                }
+            }
+
+            std::lock_guard<std::mutex> lock(*eventsBufferMutex);
+
+            for (auto it = queuedEvents.begin(); it != queuedEvents.end(); it++)
+            {
+                auto &change = *it;
+                if (change->flags & options.notifyFilterFlags)
+                {
+                    eventsBuffer->push(std::move(*it));
+                }
+            }
+
+            if (watchDescriptors.size() == 0)
+            {
+                break;
+            }
+        }
+    }
+
+end_event_loop:
+
 #else
-		if (!ReadDirectoryChangesExW(
-				directory,
-				buffer.get(),
-				options.bufferSize,
-				options.subtree,
-				FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE,
-				nullptr,
-				&overlapped,
-				nullptr,
-				ReadDirectoryNotifyExtendedInformation))
-		{
-			running = false;
-			break;
-		}
+    bool running = true;
 
-		switch (WaitForMultipleObjects(2, waitHandles, FALSE, INFINITE))
-		{
-		case WAIT_OBJECT_0 + 1:
-		{
-			DWORD dwBytes = 0;
-			if (!GetOverlappedResult(directory, &overlapped, &dwBytes, TRUE))
-			{
-				running = false;
-				break;
-			}
+    while (running)
+    {
+        if (!ReadDirectoryChangesExW(
+                directory,
+                buffer.get(),
+                options.bufferSize,
+                options.subtree,
+                FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE,
+                nullptr,
+                &overlapped,
+                nullptr,
+                ReadDirectoryNotifyExtendedInformation))
+        {
+            running = false;
+            break;
+        }
 
-			ResetEvent(watchEvent);
+        switch (WaitForMultipleObjects(2, waitHandles, FALSE, INFINITE))
+        {
+        case WAIT_OBJECT_0 + 1:
+        {
+            DWORD dwBytes = 0;
+            if (!GetOverlappedResult(directory, &overlapped, &dwBytes, TRUE))
+            {
+                running = false;
+                break;
+            }
 
-			if (dwBytes == 0)
-			{
-				break;
-			}
+            ResetEvent(watchEvent);
 
-			std::vector<std::unique_ptr<NotifyEvent>> queuedEvents;
+            if (dwBytes == 0)
+            {
+                break;
+            }
 
-			char *p = buffer.get();
-			for (;;)
-			{
-				FILE_NOTIFY_EXTENDED_INFORMATION *info = reinterpret_cast<FILE_NOTIFY_EXTENDED_INFORMATION *>(p);
-				std::wstring fileName(info->FileName, info->FileNameLength / sizeof(wchar_t));
-				fs::path path = basePath / fileName;
+            std::vector<std::unique_ptr<NotifyEvent>> queuedEvents;
 
-				switch (info->Action)
-				{
-				case FILE_ACTION_ADDED:
-				{
-					auto change = std::make_unique<NotifyEvent>();
-					change->type = kFilesystem;
-					change->flags = kCreated;
-					change->path = path.string();
+            char *p = buffer.get();
+            for (;;)
+            {
+                FILE_NOTIFY_EXTENDED_INFORMATION *info = reinterpret_cast<FILE_NOTIFY_EXTENDED_INFORMATION *>(p);
+                std::wstring fileName(info->FileName, info->FileNameLength / sizeof(wchar_t));
+                fs::path path = basePath / fileName;
 
-					queuedEvents.push_back(std::move(change));
+                switch (info->Action)
+                {
+                case FILE_ACTION_ADDED:
+                {
+                    auto change = std::make_unique<NotifyEvent>();
+                    change->type = kFilesystem;
+                    change->flags = kCreated;
+                    change->path = path.string();
 
-					if (options.subtree && options.symlinks && fs::is_symlink(path) && fs::is_directory(path))
-					{
-						workers.push_back(std::make_unique<Worker>(path, options, eventsBuffer, eventsBufferMutex));
-					}
+                    queuedEvents.push_back(std::move(change));
 
-					break;
-				}
-				case FILE_ACTION_REMOVED:
-				{
-					auto change = std::make_unique<NotifyEvent>();
-					change->type = kFilesystem;
-					change->flags = kDeleted;
-					change->path = path.string();
+                    if (options.subtree && options.symlinks && fs::is_symlink(path) && fs::is_directory(path))
+                    {
+                        workers.push_back(std::make_unique<Worker>(path, options, eventsBuffer, eventsBufferMutex));
+                    }
 
-					queuedEvents.push_back(std::move(change));
+                    break;
+                }
+                case FILE_ACTION_REMOVED:
+                {
+                    auto change = std::make_unique<NotifyEvent>();
+                    change->type = kFilesystem;
+                    change->flags = kDeleted;
+                    change->path = path.string();
 
-					if (options.subtree)
-					{
-						for (auto it = workers.begin(); it != workers.end(); it++)
-						{
-							auto &worker = *it;
+                    queuedEvents.push_back(std::move(change));
 
-							if (!worker->IsRunning() || worker->basePath == path)
-							{
-								it = workers.erase(it);
-							}
-						}
-					}
+                    if (options.subtree)
+                    {
+                        for (auto it = workers.begin(); it != workers.end(); it++)
+                        {
+                            auto &worker = *it;
 
-					break;
-				}
-				case FILE_ACTION_MODIFIED:
-				{
-					if (info->FileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-					{
-						break;
-					}
+                            if (!worker->IsRunning() || worker->basePath == path)
+                            {
+                                it = workers.erase(it);
+                            }
+                        }
+                    }
 
-					auto change = std::make_unique<NotifyEvent>();
-					change->type = kFilesystem;
-					change->flags = kModified;
-					change->path = path.string();
+                    break;
+                }
+                case FILE_ACTION_MODIFIED:
+                {
+                    if (info->FileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                    {
+                        break;
+                    }
 
-					queuedEvents.push_back(std::move(change));
+                    auto change = std::make_unique<NotifyEvent>();
+                    change->type = kFilesystem;
+                    change->flags = kModified;
+                    change->path = path.string();
 
-					break;
-				}
-				case FILE_ACTION_RENAMED_OLD_NAME:
-				{
-					auto change = std::make_unique<NotifyEvent>();
-					change->type = kFilesystem;
-					change->flags = kRenamed;
-					change->lastPath = path.string();
+                    queuedEvents.push_back(std::move(change));
 
-					queuedEvents.push_back(std::move(change));
+                    break;
+                }
+                case FILE_ACTION_RENAMED_OLD_NAME:
+                {
+                    auto change = std::make_unique<NotifyEvent>();
+                    change->type = kFilesystem;
+                    change->flags = kRenamed;
+                    change->lastPath = path.string();
 
-					break;
-				}
-				case FILE_ACTION_RENAMED_NEW_NAME:
-				{
-					auto &change = queuedEvents.back();
-					change->path = path.string();
+                    queuedEvents.push_back(std::move(change));
 
-					if (options.subtree)
-					{
-						for (auto it = workers.begin(); it != workers.end(); it++)
-						{
-							auto &worker = *it;
+                    break;
+                }
+                case FILE_ACTION_RENAMED_NEW_NAME:
+                {
+                    auto &change = queuedEvents.back();
+                    change->path = path.string();
 
-							if (!worker->IsRunning() || worker->basePath == change->lastPath)
-							{
-								it = workers.erase(it);
-							}
-						}
+                    if (options.subtree)
+                    {
+                        for (auto it = workers.begin(); it != workers.end(); it++)
+                        {
+                            auto &worker = *it;
 
-						if (options.symlinks && fs::is_symlink(path) && fs::is_directory(path))
-						{
-							workers.push_back(std::make_unique<Worker>(path, options, eventsBuffer, eventsBufferMutex));
-						}
-					}
+                            if (!worker->IsRunning() || worker->basePath == change->lastPath)
+                            {
+                                it = workers.erase(it);
+                            }
+                        }
 
-					break;
-				}
-				}
+                        if (options.symlinks && fs::is_symlink(path) && fs::is_directory(path))
+                        {
+                            workers.push_back(std::make_unique<Worker>(path, options, eventsBuffer, eventsBufferMutex));
+                        }
+                    }
 
-				if (!info->NextEntryOffset)
-				{
-					break;
-				}
+                    break;
+                }
+                }
 
-				p += info->NextEntryOffset;
-			}
+                if (!info->NextEntryOffset)
+                {
+                    break;
+                }
 
-			std::lock_guard<std::mutex> lock(*eventsBufferMutex);
+                p += info->NextEntryOffset;
+            }
 
-			for (auto it = queuedEvents.begin(); it != queuedEvents.end(); it++)
-			{
-				auto &change = *it;
-				if (change->flags & options.notifyFilterFlags)
-				{
-					eventsBuffer->push(std::move(*it));
-				}
-			}
+            std::lock_guard<std::mutex> lock(*eventsBufferMutex);
 
-			break;
-		}
-		case WAIT_FAILED:
-		{
-			running = false;
+            for (auto it = queuedEvents.begin(); it != queuedEvents.end(); it++)
+            {
+                auto &change = *it;
+                if (change->flags & options.notifyFilterFlags)
+                {
+                    eventsBuffer->push(std::move(*it));
+                }
+            }
 
-			std::cerr << "Failed to wait: code " << std::hex << GetLastError() << std::endl;
-
-			break;
-		}
-		default:
-		{
-			running = false;
-			break;
-		}
-		}
+            break;
+        }
+        default:
+        {
+            running = false;
+            break;
+        }
+        }
+    }
 #endif
-	}
 
-	{
-		std::lock_guard<std::mutex> lock(*eventsBufferMutex);
+{
+    std::lock_guard<std::mutex> lock(*eventsBufferMutex);
 
-		auto change = std::make_unique<NotifyEvent>();
-		change->type = kStop;
-		change->path = basePath.string();
+    auto change = std::make_unique<NotifyEvent>();
+    change->type = kStop;
+    change->path = basePath.string();
 
-		eventsBuffer->push(std::move(change));
-	}
+    eventsBuffer->push(std::move(change));
+}
 }
 
 DirectoryWatcher::DirectoryWatcher()
-#ifdef __linux__
-	: m_threadCancelEventHandle(-1),
-	  m_threadRunning(false),
-	  m_thread()
-#else
-#endif
 {
-	eventsBuffer = std::make_unique<EventQueue>();
-	eventsBufferMutex = std::make_unique<std::mutex>();
+    eventsBuffer = std::make_unique<EventQueue>();
+    eventsBufferMutex = std::make_unique<std::mutex>();
 }
 
 DirectoryWatcher::~DirectoryWatcher()
 {
-#ifdef __linux__
-	if (fcntl(m_threadCancelEventHandle, F_GETFD) != -1)
-	{
-		close(m_threadCancelEventHandle);
-	}
-#else
-#endif
-
-	StopWatching();
+    StopWatching();
 }
 
 bool DirectoryWatcher::Watch(const std::filesystem::path &absPath, const WatchOptions &options)
 {
-	if (!fs::is_directory(absPath))
-	{
-		return false;
-	}
+    if (!fs::is_directory(absPath))
+    {
+        return false;
+    }
 
-	workers.push_back(std::make_unique<Worker>(absPath, options, eventsBuffer.get(), eventsBufferMutex.get()));
+    workers.push_back(std::make_unique<Worker>(absPath, options, eventsBuffer.get(), eventsBufferMutex.get()));
 
-	return true;
+    return true;
 }
 
 bool DirectoryWatcher::IsWatching(const std::filesystem::path &absPath) const
 {
-	for (auto it = workers.begin(); it != workers.end(); it++)
-	{
-		auto &worker = *it;
-		if (worker->IsRunning() && worker->basePath == absPath)
-		{
-			return true;
-		}
-	}
+    for (auto it = workers.begin(); it != workers.end(); it++)
+    {
+        auto &worker = *it;
+        if (worker->IsRunning() && worker->basePath == absPath)
+        {
+            return true;
+        }
+    }
 
-	return false;
+    return false;
 }
 
 void DirectoryWatcher::StopWatching()
 {
-	workers.clear();
+    workers.clear();
 }
-
-/*
-bool DirectoryWatcher::Start()
-{
-	if (IsWatching())
-	{
-		return true;
-	}
-
-	if (!fs::is_directory(m_path))
-	{
-		return false;
-	}
-
-#ifdef __linux__
-	if (fcntl(m_threadCancelEventHandle, F_GETFD) == -1)
-	{
-		m_threadCancelEventHandle = eventfd(0, 0);
-	}
-	else
-	{
-		uint64_t u;
-		read(m_threadCancelEventHandle, &u, sizeof(u));
-	}
-
-	m_thread = std::thread(&DirectoryWatcher::ThreadProc, this, std::move(config));
-#else
-	workers.push_back(std::make_unique<Worker>(this, m_path, watchOptions));
-#endif
-
-	watching = true;
-
-	return true;
-}
-
-void DirectoryWatcher::Stop()
-{
-	if (!IsWatching())
-	{
-		return;
-	}
-
-	watching = false;
-
-#ifdef __linux__
-	uint64_t u = 1;
-	write(m_threadCancelEventHandle, &u, sizeof(u));
-
-	if (m_thread.joinable())
-	{
-		m_thread.join();
-	}
-#else
-	workers.clear();
-#endif
-
-	ProcessEvents();
-}
-*/
-
-/*
-void DirectoryWatcher::ThreadProc(std::unique_ptr<WatchOptions> config)
-{
-	class ThreadData
-	{
-	public:
-#ifdef __linux__
-		int inotify_fd;
-		int inotify_root_wd;
-		std::map<int, fs::path> wd;
-		uint32_t mask;
-#endif
-
-		ThreadData()
-		{
-#ifdef __linux__
-			inotify_fd = -1;
-			inotify_root_wd = -1;
-			mask = 0;
-#else
-			//directory = INVALID_HANDLE_VALUE;
-			//changeEvent = nullptr;
-#endif
-		}
-
-		~ThreadData()
-		{
-#ifdef __linux__
-			if (fcntl(inotify_fd, F_GETFD) != -1)
-			{
-				for (auto it = wd.begin(); it != wd.end(); it++)
-				{
-					inotify_rm_watch(inotify_fd, it->first);
-				}
-
-				close(inotify_fd);
-			}
-#else
-			std::lock_guard<std::mutex> lock(threadsMutex);
-			threads.clear();
-
-			if (changeEvent && changeEvent != INVALID_HANDLE_VALUE)
-			{
-				CloseHandle(changeEvent);
-			}
-
-			if (directory && directory != INVALID_HANDLE_VALUE)
-			{
-				CloseHandle(directory);
-			}
-#endif
-		}
-
-#ifdef __linux__
-		int AddWatch(const std::unique_ptr<ThreadConfig> &config, const fs::path &path, uint32_t _mask = 0)
-#else
-		HANDLE AddWatch(const std::unique_ptr<WatchOptions> &config, const fs::path &path, DWORD _dwNotifyFilter = 0)
-#endif
-		{
-			fs::path lexicalAbsPath(config->root_path);
-			lexicalAbsPath /= path;
-
-#ifdef __linux__
-			int _wd = -1;
-			_mask |= mask;
-
-			_wd = inotify_add_watch(inotify_fd, lexicalAbsPath.c_str(), _mask);
-			if (_wd != -1)
-			{
-				auto it = wd.find(_wd);
-				if (it != wd.end())
-				{
-					wd.erase(it);
-				}
-
-				wd.emplace(_wd, path.lexically_normal());
-			}
-#else
-			// TODO
-#endif
-
-			if (config->includeSubdirectories)
-			{
-				for (const auto& entry : fs::recursive_directory_iterator(lexicalAbsPath))
-				{
-					fs::path initialPath = entry;
-					fs::path entryPath = entry;
-
-					if (entry.is_symlink())
-					{
-						entryPath = fs::read_symlink(entry);
-						if (!fs::exists(entryPath))
-						{
-							continue;
-						}
-					}
-#ifndef __linux__
-					else
-					{
-						continue;
-					}
-#endif
-
-					if (!fs::is_directory(entryPath))
-					{
-						continue;
-					}
-
-					bool old = config->includeSubdirectories;
-					config->includeSubdirectories = false;
-#ifdef __linux__
-					AddWatch(config, initialPath.lexically_relative(config->root_path), mask);
-#else
-					// TODO
-#endif
-					config->includeSubdirectories = old;
-				}
-			}
-
-#ifdef __linux__
-			return _wd;
-#else
-			return INVALID_HANDLE_VALUE;
-#endif
-		}
-	};
-
-	bool isRunning = true;
-
-	while (isRunning)
-	{
-		bool didStart = false;
-
-		std::unique_ptr<ThreadData> data = std::make_unique<ThreadData>();
-		std::unique_ptr<char[]> buffer(new char[config->bufferSize]);
-
-		if (!fs::is_directory(config->root_path))
-		{
-			goto terminate;
-		}
-
-#ifdef __linux__
-		data->inotify_fd = inotify_init1(IN_NONBLOCK);
-		if (data->inotify_fd == -1)
-		{
-			goto terminate;
-		}
-
-		data->mask = 0;
-
-		if (config->includeSubdirectories)
-		{
-			data->mask |= (IN_CREATE | IN_MOVE);
-		}
-		else
-		{
-			if (config->notifyFilters & FSW_NOTIFY_CREATED)
-			{
-				data->mask |= IN_CREATE;
-			}
-
-			if (config->notifyFilters & FSW_NOTIFY_RENAMED)
-			{
-				data->mask |= IN_MOVE;
-			}
-		}
-
-		if (config->notifyFilters & FSW_NOTIFY_DELETED)
-		{
-			data->mask |= IN_DELETE;
-		}
-
-		if (config->notifyFilters & FSW_NOTIFY_MODIFIED)
-		{
-			data->mask |= IN_CLOSE_WRITE;
-		}
-
-		data->inotify_root_wd = data->AddWatch(config, "", IN_DELETE_SELF | IN_MOVE_SELF);
-		if (data->inotify_root_wd == -1)
-		{
-			goto terminate;
-		}
-#else
-		DWORD dwNotifyFilter = 0;
-
-		if (config->notifyFilters & (FSW_NOTIFY_RENAMED | FSW_NOTIFY_CREATED | FSW_NOTIFY_DELETED))
-		{
-			dwNotifyFilter |= FILE_NOTIFY_CHANGE_FILE_NAME;
-			dwNotifyFilter |= FILE_NOTIFY_CHANGE_DIR_NAME;
-		}
-
-		if (config->notifyFilters & FSW_NOTIFY_MODIFIED)
-		{
-			dwNotifyFilter |= FILE_NOTIFY_CHANGE_LAST_WRITE;
-		}
-
-		data->directory = CreateFileA(
-			config->root_path.string().c_str(),
-			FILE_LIST_DIRECTORY | GENERIC_READ,
-			FILE_SHARE_READ | FILE_SHARE_WRITE,
-			nullptr,
-			OPEN_EXISTING,
-			FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
-			nullptr);
-
-		if (data->directory == INVALID_HANDLE_VALUE)
-		{
-			goto terminate;
-		}
-#endif
-
-		didStart = true;
-
-		{
-			std::lock_guard<std::mutex> lock(m_changeEventsMutex);
-
-			auto ev = std::make_unique<NotifyEvent>();
-			ev->type = NotifyEvent::NotifyEventType::START;
-			m_changeEvents.push(std::move(ev));
-		}
-
-#ifdef __linux__
-		pollfd fds[2];
-
-		fds[0].fd = data->inotify_fd;
-		fds[0].events = POLLIN;
-
-		fds[1].fd = m_threadCancelEventHandle;
-		fds[1].events = POLLIN;
-#else
-		data->changeEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
-
-		HANDLE waitHandles[2];
-		waitHandles[0] = data->changeEvent;
-		waitHandles[1] = m_threadCancelEventHandle;
-
-		OVERLAPPED overlapped;
-		ZeroMemory(&overlapped, sizeof overlapped);
-		overlapped.hEvent = data->changeEvent;
-#endif
-
-		while (true)
-		{
-#ifdef __linux__
-			if (poll(fds, 2, -1) > 0)
-			{
-				if (fds[1].revents & POLLIN)
-				{
-					isRunning = false;
-					goto terminate;
-				}
-
-				if (fds[0].revents & POLLIN)
-				{
-					std::vector<std::unique_ptr<NotifyEvent>> queuedEvents;
-
-					for (;;)
-					{
-						ssize_t len = read(data->inotify_fd, buffer.get(), config->bufferSize);
-
-						if (len == -1 && errno != EAGAIN)
-						{
-							goto terminate;
-						}
-
-						if (len <= 0)
-						{
-							break;
-						}
-
-						const inotify_event* event;
-						for (char* p = buffer.get(); p < buffer.get() + len; p += sizeof(inotify_event) + event->len)
-						{
-							event = (const inotify_event*)p;
-
-							if (event->mask & (IN_MOVE_SELF | IN_DELETE_SELF | IN_IGNORED))
-							{
-								auto it = data->wd.find(event->wd);
-								if (it != data->wd.end())
-								{
-									if (event->mask & IN_MOVE_SELF)
-									{
-										inotify_rm_watch(data->inotify_fd, event->wd);
-									}
-
-									data->wd.erase(it);
-								}
-
-								if (event->wd == data->inotify_root_wd)
-								{
-									goto terminate;
-								}
-								else
-								{
-									continue;
-								}
-							}
-
-							auto &baseRelPath = data->wd.at(event->wd);
-
-							if (event->mask & (IN_CREATE | IN_MOVED_TO))
-							{
-								if (config->includeSubdirectories && (event->mask & IN_ISDIR))
-								{
-									data->AddWatch(config, baseRelPath / event->name);
-								}
-
-								if (event->mask & IN_MOVED_TO)
-								{
-									bool foundRenamedEvent = false;
-
-									for (auto it = queuedEvents.rbegin(); it != queuedEvents.rend(); it++)
-									{
-										auto &change = *it;
-										if (change->cookie == event->cookie)
-										{
-											change->flags = FSW_NOTIFY_RENAMED;
-											change->cookie = 0;
-											change->lastPath = change->path;
-											change->path = baseRelPath / event->name;
-
-											foundRenamedEvent = true;
-											break;
-										}
-									}
-
-									if (foundRenamedEvent)
-									{
-										continue;
-									}
-								}
-
-								std::unique_ptr<NotifyEvent> change = std::make_unique<NotifyEvent>();
-								change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
-								change->flags = FSW_NOTIFY_CREATED;
-								change->cookie = event->cookie;
-								change->path = baseRelPath / event->name;
-
-								queuedEvents.push_back(std::move(change));
-							}
-
-							if (event->mask & (IN_DELETE | IN_MOVED_FROM))
-							{
-								if (event->mask & IN_MOVED_FROM)
-								{
-									bool foundRenamedEvent = false;
-
-									for (auto it = queuedEvents.rbegin(); it != queuedEvents.rend(); it++)
-									{
-										auto &change = *it;
-										if (change->cookie == event->cookie)
-										{
-											change->flags = FSW_NOTIFY_RENAMED;
-											change->cookie = 0;
-											change->lastPath = change->path;
-											change->path = baseRelPath / event->name;
-
-											foundRenamedEvent = true;
-											break;
-										}
-									}
-
-									if (foundRenamedEvent)
-									{
-										continue;
-									}
-								}
-
-								auto change = std::make_unique<NotifyEvent>();
-								change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
-								change->flags = FSW_NOTIFY_DELETED;
-								change->cookie = event->cookie;
-								change->path = baseRelPath / event->name;
-
-								queuedEvents.push_back(std::move(change));
-							}
-
-							if (event->mask & IN_CLOSE_WRITE)
-							{
-								if (config->notifyFilters & FSW_NOTIFY_MODIFIED)
-								{
-									auto change = std::make_unique<NotifyEvent>();
-									change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
-									change->flags = FSW_NOTIFY_MODIFIED;
-									change->cookie = event->cookie;
-									change->path = baseRelPath / event->name;
-
-									queuedEvents.push_back(std::move(change));
-								}
-							}
-						}
-					}
-
-					std::lock_guard<std::mutex> lock(m_changeEventsMutex);
-
-					for (auto it = queuedEvents.begin(); it != queuedEvents.end(); it++)
-					{
-						auto &change = *it;
-						if (change->flags & config->notifyFilters)
-						{
-							m_changeEvents.push(std::move(*it));
-						}
-					}
-				}
-			}
-#else
-			if (!ReadDirectoryChangesExW(data->directory,
-				buffer.get(),
-				config->bufferSize,
-				config->includeSubdirectories,
-				dwNotifyFilter,
-				nullptr,
-				&overlapped,
-				nullptr,
-				ReadDirectoryNotifyExtendedInformation))
-			{
-				goto terminate;
-			}
-
-			switch (WaitForMultipleObjects(2, waitHandles, FALSE, INFINITE))
-			{
-				case WAIT_OBJECT_0:
-				{
-					DWORD dwBytes = 0;
-					if (!GetOverlappedResult(data->directory, &overlapped, &dwBytes, TRUE))
-					{
-						goto terminate;
-					}
-
-					ResetEvent(data->changeEvent);
-
-					if (dwBytes == 0)
-					{
-						break;
-					}
-
-					std::vector<std::unique_ptr<NotifyEvent>> queuedEvents;
-
-					char *p = buffer.get();
-					for (;;)
-					{
-						FILE_NOTIFY_EXTENDED_INFORMATION* info = reinterpret_cast<FILE_NOTIFY_EXTENDED_INFORMATION*>(p);
-
-						std::wstring fileName(info->FileName, info->FileNameLength / sizeof(wchar_t));
-
-						switch (info->Action)
-						{
-							case FILE_ACTION_ADDED:
-							{
-								if (config->notifyFilters & (FSW_NOTIFY_CREATED | FSW_NOTIFY_RENAMED))
-								{
-									fs::path path(fileName);
-
-									if (!queuedEvents.empty())
-									{
-										bool isRenameEvent = false;
-
-										for (auto it = queuedEvents.rbegin(); it != queuedEvents.rend(); it++)
-										{
-											auto &change = *it;
-
-											if (change->flags == FSW_NOTIFY_DELETED)
-											{
-												std::string me = path.filename().string();
-												std::string them = fs::path(change->path).filename().string();
-
-												if (me == them)
-												{
-													change->flags = FSW_NOTIFY_RENAMED;
-													change->lastPath = change->path;
-													change->path = path.string();
-
-													isRenameEvent = true;
-													break;
-												}
-											}
-										}
-
-										if (isRenameEvent)
-										{
-											break;
-										}
-									}
-
-									auto change = std::make_unique<NotifyEvent>();
-									change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
-									change->flags = FSW_NOTIFY_CREATED;
-									change->path = path.string();
-
-									queuedEvents.push_back(std::move(change));
-								}
-
-								break;
-							}
-							case FILE_ACTION_REMOVED:
-							{
-								if (config->notifyFilters & (FSW_NOTIFY_DELETED | FSW_NOTIFY_RENAMED))
-								{
-									auto change = std::make_unique<NotifyEvent>();
-									change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
-									change->flags = FSW_NOTIFY_DELETED;
-									change->path = fs::path(fileName).string();
-
-									queuedEvents.push_back(std::move(change));
-								}
-
-								break;
-							}
-							case FILE_ACTION_MODIFIED:
-							{
-								if (config->notifyFilters & FSW_NOTIFY_MODIFIED)
-								{
-									if (info->FileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-									{
-										break;
-									}
-
-									auto change = std::make_unique<NotifyEvent>();
-									change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
-									change->flags = FSW_NOTIFY_MODIFIED;
-									change->path = fs::path(fileName).string();
-
-									queuedEvents.push_back(std::move(change));
-								}
-
-								break;
-							}
-							case FILE_ACTION_RENAMED_OLD_NAME:
-							{
-								if (config->notifyFilters & FSW_NOTIFY_RENAMED)
-								{
-									auto change = std::make_unique<NotifyEvent>();
-									change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
-									change->flags = FSW_NOTIFY_RENAMED;
-									change->lastPath = fs::path(fileName).string();
-
-									queuedEvents.push_back(std::move(change));
-								}
-
-								break;
-							}
-							case FILE_ACTION_RENAMED_NEW_NAME:
-							{
-								if (config->notifyFilters & FSW_NOTIFY_RENAMED)
-								{
-									auto &change = queuedEvents.back();
-									change->path = fs::path(fileName).string();
-								}
-
-								break;
-							}
-						}
-
-						if (!info->NextEntryOffset)
-						{
-							break;
-						}
-
-						p += info->NextEntryOffset;
-					}
-
-					std::lock_guard<std::mutex> lock(m_changeEventsMutex);
-
-					for (auto it = queuedEvents.begin(); it != queuedEvents.end(); it++)
-					{
-						auto &change = *it;
-						if (change->flags & config->notifyFilters)
-						{
-							m_changeEvents.push(std::move(*it));
-						}
-					}
-
-					break;
-				}
-				case WAIT_OBJECT_0 + 1:
-				{
-					isRunning = false;
-					goto terminate;
-				}
-				default:
-				{
-					goto terminate;
-				}
-			}
-#endif
-		}
-
-terminate:
-		if (didStart)
-		{
-			std::lock_guard<std::mutex> lock(m_changeEventsMutex);
-
-			auto ev = std::make_unique<NotifyEvent>();
-			ev->type = NotifyEvent::NotifyEventType::EXIT;
-			m_changeEvents.push(std::move(ev));
-		}
-
-		if (isRunning)
-		{
-#ifdef __linux__
-			pollfd retry_fds[1];
-
-			retry_fds[0].fd = m_threadCancelEventHandle;
-			retry_fds[0].events = POLLIN;
-
-			if (poll(retry_fds, 1, config->retryInterval) > 0)
-			{
-				if (retry_fds[0].revents & POLLIN)
-				{
-					isRunning = false;
-				}
-			}
-#else
-			switch (WaitForSingleObject(m_threadCancelEventHandle, config->retryInterval))
-			{
-				case WAIT_OBJECT_0:
-				{
-					isRunning = false;
-					break;
-				}
-			}
-#endif
-		}
-	}
-}
-*/
 
 void DirectoryWatcher::ProcessEvents()
 {
-	std::lock_guard<std::mutex> lock(*eventsBufferMutex.get());
+    std::lock_guard<std::mutex> lock(*eventsBufferMutex.get());
 
-	while (!eventsBuffer->empty())
-	{
-		auto &front = eventsBuffer->front();
-		OnProcessEvent(*front.get());
-		eventsBuffer->pop();
-	}
+    while (!eventsBuffer->empty())
+    {
+        auto &front = eventsBuffer->front();
+        OnProcessEvent(*front.get());
+        eventsBuffer->pop();
+    }
 }
 
 void DirectoryWatcher::OnProcessEvent(const NotifyEvent &event)

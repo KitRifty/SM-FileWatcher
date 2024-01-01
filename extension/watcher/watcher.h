@@ -48,96 +48,97 @@
 class DirectoryWatcher
 {
 public:
-	enum NotifyFilterFlags : unsigned int
-	{
-		kNone = 0,
-		kCreated = (1 << 0),
-		kDeleted = (1 << 1),
-		kModified = (1 << 2),
-		kRenamed = (1 << 3),
-		kNotifyAll = (kNone - 1)
-	};
+    enum NotifyFilterFlags : unsigned int
+    {
+        kNone = 0,
+        kCreated = (1 << 0),
+        kDeleted = (1 << 1),
+        kModified = (1 << 2),
+        kRenamed = (1 << 3),
+        kNotifyAll = (kNone - 1)
+    };
 
-	struct WatchOptions
-	{
-		bool subtree;
-		bool symlinks;
-		NotifyFilterFlags notifyFilterFlags;
-		size_t bufferSize;
-		int retryInterval;
-	};
+    struct WatchOptions
+    {
+        bool subtree;
+        bool symlinks;
+        NotifyFilterFlags notifyFilterFlags;
+        size_t bufferSize;
+        int retryInterval;
+    };
 
-	enum NotifyEventType
-	{
-		kFilesystem = 0,
-		kStart,
-		kStop
-	};
+    enum NotifyEventType
+    {
+        kFilesystem = 0,
+        kStart,
+        kStop
+    };
 
-	struct NotifyEvent
-	{
-	public:
-		NotifyEventType type;
-		NotifyFilterFlags flags;
-		std::string lastPath;
-		std::string path;
+    struct NotifyEvent
+    {
+    public:
+        NotifyEventType type;
+        NotifyFilterFlags flags;
+        std::string lastPath;
+        std::string path;
 
 #ifdef __linux__
-		uint32_t cookie;
+        uint32_t cookie;
 #endif
-	};
+    };
 
-	typedef std::queue<std::unique_ptr<NotifyEvent>> EventQueue;
+    typedef std::queue<std::unique_ptr<NotifyEvent>> EventQueue;
 
 public:
-	DirectoryWatcher();
-	virtual ~DirectoryWatcher();
-	bool Watch(const std::filesystem::path &absPath, const WatchOptions &options);
-	bool IsWatching(const std::filesystem::path &absPath) const;
-	void StopWatching();
+    DirectoryWatcher();
+    virtual ~DirectoryWatcher();
+    bool Watch(const std::filesystem::path &absPath, const WatchOptions &options);
+    bool IsWatching(const std::filesystem::path &absPath) const;
+    void StopWatching();
 
-	void ProcessEvents();
-	virtual void OnProcessEvent(const NotifyEvent &event);
+    void ProcessEvents();
+    virtual void OnProcessEvent(const NotifyEvent &event);
 
 private:
-	std::unique_ptr<EventQueue> eventsBuffer;
-	std::unique_ptr<std::mutex> eventsBufferMutex;
+    std::unique_ptr<EventQueue> eventsBuffer;
+    std::unique_ptr<std::mutex> eventsBufferMutex;
 
-	class Worker
-	{
-	public:
-		Worker(const std::filesystem::path &path, const WatchOptions &options, EventQueue *eventsBuffer, std::mutex *eventsBufferMutex);
-		~Worker();
-		inline bool IsRunning() const { return thread.joinable(); }
+    class Worker
+    {
+    public:
+        Worker(const std::filesystem::path &path, const WatchOptions &options, EventQueue *eventsBuffer, std::mutex *eventsBufferMutex);
+        ~Worker();
+        inline bool IsRunning() const { return thread.joinable(); }
 
-		const std::filesystem::path basePath;
+    private:
+#ifdef __linux__
+        int AddDirectory(const std::filesystem::path &path);
+#endif
 
-	private:
-		void ThreadProc();
+        void ThreadProc();
 
-		EventQueue *eventsBuffer;
-		std::mutex *eventsBufferMutex;
+    public:
+        const std::filesystem::path basePath;
 
-		const WatchOptions options;
-		std::vector<std::unique_ptr<Worker>> workers;
-		std::thread thread;
+    private:
+        EventQueue *eventsBuffer;
+        std::mutex *eventsBufferMutex;
+
+        const WatchOptions options;
+        std::thread thread;
 
 #ifdef __linux__
+        int fileDescriptor;
+        std::map<int, std::filesystem::path> watchDescriptors;
+        int cancelEvent;
 #else
-		ScopedHandle directory;
-		ScopedHandle cancelEvent;
+        std::vector<std::unique_ptr<Worker>> workers;
+        ScopedHandle directory;
+        ScopedHandle cancelEvent;
 #endif
-	};
+    };
 
-	std::vector<std::unique_ptr<Worker>> workers;
-
-#ifdef __linux__
-	std::thread m_thread;
-	std::mutex m_threadRunningMutex;
-	bool m_threadRunning;
-	int m_threadCancelEventHandle;
-#else
-#endif
+    std::vector<std::unique_ptr<Worker>> workers;
 };
 
 #endif // WATCHER_H_

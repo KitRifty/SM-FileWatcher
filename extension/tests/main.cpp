@@ -43,27 +43,41 @@ public:
         }
         case kStart:
         {
-            std::cout << "Started watching " << fs::path(event.path).lexically_relative(basePath) << std::endl;
+            if (event.path == basePath)
+            {
+                std::cout << "Started watching" << std::endl;
+            }
+
             break;
         }
         case kStop:
         {
-            std::cout << "Stopped watching " << fs::path(event.path).lexically_relative(basePath) << std::endl;
+            if (event.path == basePath)
+            {
+                std::cout << "Stopped watching" << std::endl;
+            }
+
             break;
         }
         }
     }
 };
 
-bool IsSubPath(const fs::path &base, const fs::path &child)
-{
-    auto relative = child.lexically_relative(base);
-    return !relative.empty() && *relative.begin() != "..";
-}
-
 class TempDir
 {
 public:
+#ifdef __linux__
+    TempDir()
+    {
+        char temp[] = "/tmp/watchertestXXXXXX";
+        char *p = mkdtemp(temp);
+
+        if (p != nullptr)
+        {
+            path = p;
+        }
+    }
+#else
     TempDir(const fs::path &filename) : path(filename)
     {
         if (IsSubPath(fs::temp_directory_path(), filename) && fs::create_directories(filename))
@@ -72,9 +86,11 @@ public:
         }
         else
         {
-            throw std::runtime_error("Failed to create directory " + filename.string());
+            std::cerr << "Failed to create directory " << filename << std::endl;
+            exit(1);
         }
     }
+#endif
 
     ~TempDir()
     {
@@ -89,8 +105,78 @@ public:
 
 int main()
 {
+#ifdef __linux__
+    std::string expected = "Started watching"
+                           "\n"
+                           "Created \"subdir1\""
+                           "\n"
+                           "Created \"subdir2\""
+                           "\n"
+                           "Created \"subdir2/subdir21\""
+                           "\n"
+                           "Renamed \"subdir2/subdir21\" to \"subdir2/another_subdir\""
+                           "\n"
+                           "Created \"subdir1/new_file\""
+                           "\n"
+                           "Modified \"subdir1/new_file\""
+                           "\n"
+                           "Created \"sym_link_dir\""
+                           "\n"
+                           "Deleted \"subdir1/new_file\""
+                           "\n"
+                           "Created \"sym_link_dir/subdir\""
+                           "\n"
+                           "Created \"sym_link_dir/subdir/new_file_in_sym\""
+                           "\n"
+                           "Modified \"sym_link_dir/subdir/new_file_in_sym\""
+                           "\n"
+                           "Deleted \"sym_link_dir\""
+                           "\n"
+                           "Stopped watching"
+                           "\n";
+#else
+    std::string expected = "Started watching"
+                           "\n"
+                           "Created \"subdir1\""
+                           "\n"
+                           "Created \"subdir2\""
+                           "\n"
+                           "Created \"subdir2\\subdir21\""
+                           "\n"
+                           "Renamed \"subdir2\\subdir21\" to \"subdir2\\another_subdir\""
+                           "\n"
+                           "Created \"subdir1\\new_file\""
+                           "\n"
+                           "Modified \"subdir1\\new_file\""
+                           "\n"
+                           "Created \"sym_link_dir\""
+                           "\n"
+                           "Deleted \"subdir1\\new_file\""
+                           "\n"
+                           "Created \"sym_link_dir\\subdir\""
+                           "\n"
+                           "Created \"sym_link_dir\\subdir\\new_file_in_sym\""
+                           "\n"
+                           "Modified \"sym_link_dir\\subdir\\new_file_in_sym\""
+                           "\n"
+                           "Stopped watching"
+                           "\n"
+                           "Started watching"
+                           "\n"
+                           "Stopped watching"
+                           "\n";
+#endif
+
+    std::stringstream output;
+    std::streambuf *old_stdout = std::cout.rdbuf(output.rdbuf());
+
+#ifdef __linux__
+    TempDir watchedDir;
+    TempDir watchedSymDir;
+#else
     TempDir watchedDir(std::tmpnam(nullptr));
     TempDir watchedSymDir(std::tmpnam(nullptr));
+#endif
 
     DirectoryWatcher::WatchOptions options;
     options.subtree = true;
@@ -114,27 +200,55 @@ int main()
     fs::create_directories(watchedDir.path / "subdir1");
     fs::create_directories(watchedDir.path / "subdir2" / "subdir21");
     fs::rename(watchedDir.path / "subdir2" / "subdir21", watchedDir.path / "subdir2" / "another_subdir");
+
+    auto file = std::ofstream(watchedDir.path / "subdir1" / "new_file");
+    file.close();
+
     fs::create_directory_symlink(watchedSymDir.path, watchedDir.path / "sym_link_dir");
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     watcher.ProcessEvents();
+
+    fs::remove(watchedDir.path / "subdir1" / "new_file");
 
     fs::create_directories(watchedSymDir.path / "subdir");
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     watcher.ProcessEvents();
 
-    fs::remove(watchedSymDir.path / "subdir");
+    file = std::ofstream(watchedSymDir.path / "subdir" / "new_file_in_sym");
+    file.close();
 
-    watcher.StopWatching();
-
-    // cannot remove watched symlinked subdirectories on Windows
+#ifdef __linux__
     fs::remove(watchedDir.path / "sym_link_dir");
-
+#else
+    // cannot remove watched symlinked subdirectories on Windows
+    watcher.StopWatching();
+    fs::remove(watchedDir.path / "sym_link_dir");
     watcher.Watch(watchedDir.path, options);
+#endif
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     watcher.ProcessEvents();
+    watcher.StopWatching();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    watcher.ProcessEvents();
+
+    std::string out = output.str();
+    std::cout.rdbuf(old_stdout);
+
+    if (out != expected)
+    {
+        std::cerr << "FAIL!" << std::endl
+                  << "Expected:" << std::endl
+                  << expected << std::endl
+                  << "Got:" << std::endl
+                  << out << std::endl;
+        return 1;
+    }
+
+    std::cout << "PASS!" << std::endl;
 
     return 0;
 }

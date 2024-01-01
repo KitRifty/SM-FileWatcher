@@ -36,17 +36,17 @@ SMEXT_LINK(&g_Extension);
 
 bool FileWatcherExtension::SDK_OnLoad(char *error, size_t maxlen, bool late)
 {
-	if (!g_FileSystemWatchers.SDK_OnLoad(error, maxlen))
-	{
-		return false;
-	}
+    if (!g_FileSystemWatchers.SDK_OnLoad(error, maxlen))
+    {
+        return false;
+    }
 
-	sharesys->RegisterLibrary(myself, "filewatcher");
+    sharesys->RegisterLibrary(myself, "filewatcher");
 
-	return true;
+    return true;
 }
 
 void FileWatcherExtension::SDK_OnUnload()
 {
-	g_FileSystemWatchers.SDK_OnUnload();
+    g_FileSystemWatchers.SDK_OnUnload();
 }
