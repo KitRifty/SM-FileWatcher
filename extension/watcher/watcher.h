@@ -105,7 +105,7 @@ private:
     class Worker
     {
     public:
-        Worker(const std::filesystem::path &path, const WatchOptions &options, EventQueue *eventsBuffer, std::mutex *eventsBufferMutex);
+        Worker(bool isRoot, const std::filesystem::path &path, const WatchOptions &options, EventQueue *eventsBuffer, std::mutex *eventsBufferMutex);
         ~Worker();
         inline bool IsRunning() const { return thread.joinable(); }
 
@@ -117,6 +117,7 @@ private:
         void ThreadProc();
 
     public:
+        bool isRootWorker;
         const std::filesystem::path basePath;
 
     private:

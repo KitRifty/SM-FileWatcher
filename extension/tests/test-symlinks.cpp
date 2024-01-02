@@ -57,21 +57,34 @@ TEST(SymbolicLinks, CreateRenameDeleteDir)
     watcher.ProcessEvents();
 
     ASSERT_EQ(watcher.events.size(), 5);
-    ASSERT_EQ(watcher.events[0].type, DirectoryWatcher::NotifyEventType::kStart);
-    ASSERT_EQ(watcher.events[0].path, dir.GetPath());
 
-    ASSERT_EQ(watcher.events[1].type, DirectoryWatcher::NotifyEventType::kFilesystem);
-    ASSERT_EQ(watcher.events[1].flags, DirectoryWatcher::NotifyFilterFlags::kCreated);
-    ASSERT_EQ(watcher.events[1].path, dir.GetPath() / "sym_link");
+    size_t i = 0;
 
-    ASSERT_EQ(watcher.events[2].type, DirectoryWatcher::NotifyEventType::kFilesystem);
-    ASSERT_EQ(watcher.events[2].flags, DirectoryWatcher::NotifyFilterFlags::kCreated);
-    ASSERT_EQ(watcher.events[2].path, dir.GetPath() / "sym_link" / "existing_file");
+    ASSERT_EQ(watcher.events[i].type, DirectoryWatcher::NotifyEventType::kStart);
+    ASSERT_EQ(watcher.events[i].path, dir.GetPath());
 
-    ASSERT_EQ(watcher.events[3].type, DirectoryWatcher::NotifyEventType::kFilesystem);
-    ASSERT_EQ(watcher.events[3].flags, DirectoryWatcher::NotifyFilterFlags::kModified);
-    ASSERT_EQ(watcher.events[3].path, dir.GetPath() / "sym_link" / "existing_file");
+    i++;
 
-    ASSERT_EQ(watcher.events[4].type, DirectoryWatcher::NotifyEventType::kStop);
-    ASSERT_EQ(watcher.events[4].path, dir.GetPath());
+    ASSERT_EQ(watcher.events[i].type, DirectoryWatcher::NotifyEventType::kFilesystem);
+    ASSERT_EQ(watcher.events[i].flags, DirectoryWatcher::NotifyFilterFlags::kCreated);
+    ASSERT_EQ(watcher.events[i].path, dir.GetPath() / "sym_link");
+
+    i++;
+
+    ASSERT_EQ(watcher.events[i].type, DirectoryWatcher::NotifyEventType::kFilesystem);
+    ASSERT_EQ(watcher.events[i].flags, DirectoryWatcher::NotifyFilterFlags::kCreated);
+    ASSERT_EQ(watcher.events[i].path, dir.GetPath() / "sym_link" / "existing_file");
+
+    i++;
+
+    ASSERT_EQ(watcher.events[i].type, DirectoryWatcher::NotifyEventType::kFilesystem);
+    ASSERT_EQ(watcher.events[i].flags, DirectoryWatcher::NotifyFilterFlags::kModified);
+    ASSERT_EQ(watcher.events[i].path, dir.GetPath() / "sym_link" / "existing_file");
+
+    i++;
+
+    ASSERT_EQ(watcher.events[i].type, DirectoryWatcher::NotifyEventType::kStop);
+    ASSERT_EQ(watcher.events[i].path, dir.GetPath());
+
+    i++;
 }

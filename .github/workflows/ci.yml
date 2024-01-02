@@ -83,7 +83,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ runner.os }}
-          path: extension/build/package
+          path: |
+            extension/build/package
+            !extension/build/package/tests/*
 
       - name: Upload artifact
         if: github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && strategy.job-index == 0

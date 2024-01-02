@@ -1,13 +1,12 @@
 # vim: set ts=8 sts=2 sw=2 tw=99 et ft=python:
 import os
 
-# This is where the files will be output to
-# package is the default
 builder.SetBuildFolder('package')
 
 folder_list = [
     'addons/sourcemod/extensions',
     'addons/sourcemod/scripting/include',
+    'tests',
     # 'addons/sourcemod/gamedata',
     # 'addons/sourcemod/configs',
 ]
@@ -15,6 +14,7 @@ folder_list = [
 if 'x86_64' in Extension.target_archs:
     folder_list.extend([
         'addons/sourcemod/extensions/x64',
+        'tests/x64'
     ])
 
 folder_map = {}
@@ -33,7 +33,7 @@ def CopyFiles(src, dest, files):
 
 
 CopyFiles('pawn/scripting/include', 'addons/sourcemod/scripting/include',
-          ['filewatcher.inc', ]
+          ['filewatcher.inc']
           )
 
 # GameData files
@@ -57,3 +57,12 @@ for cxx_task in Extension.extensions:
     else:
         builder.AddCopy(cxx_task.binary,
                         folder_map['addons/sourcemod/extensions'])
+
+for arch in Extension.tests:
+    binary = Extension.tests[arch]
+    if arch == 'x86_64':
+        builder.AddCopy(binary,
+                        folder_map['tests/x64'])
+    else:
+        builder.AddCopy(binary,
+                        folder_map['tests'])

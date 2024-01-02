@@ -45,10 +45,12 @@
 namespace fs = std::filesystem;
 
 DirectoryWatcher::Worker::Worker(
+    bool isRoot,
     const std::filesystem::path &path,
     const WatchOptions &_options,
     EventQueue *eventsBuffer,
-    std::mutex *eventsBufferMutex) : basePath(path.lexically_normal()),
+    std::mutex *eventsBufferMutex) : isRootWorker(isRoot),
+                                     basePath(path.lexically_normal()),
                                      eventsBuffer(eventsBuffer),
                                      eventsBufferMutex(eventsBufferMutex),
                                      options(_options)
@@ -106,7 +108,7 @@ DirectoryWatcher::Worker::Worker(
                     {
                         if (fs::is_symlink(entry))
                         {
-                            workers.push_back(std::make_unique<Worker>(fs::path(entry), options, eventsBuffer, eventsBufferMutex));
+                            workers.push_back(std::make_unique<Worker>(false, fs::path(entry), options, eventsBuffer, eventsBufferMutex));
                         }
                         else
                         {
@@ -214,6 +216,7 @@ void DirectoryWatcher::Worker::ThreadProc()
     overlapped.hEvent = watchEvent;
 #endif
 
+    if (isRootWorker)
     {
         std::lock_guard<std::mutex> lock(*eventsBufferMutex);
 
@@ -468,7 +471,7 @@ end_event_loop:
 
                     if (options.subtree && options.symlinks && fs::is_symlink(path) && fs::is_directory(path))
                     {
-                        workers.push_back(std::make_unique<Worker>(path, options, eventsBuffer, eventsBufferMutex));
+                        workers.push_back(std::make_unique<Worker>(false, path, options, eventsBuffer, eventsBufferMutex));
                     }
 
                     break;
@@ -543,7 +546,7 @@ end_event_loop:
 
                         if (options.symlinks && fs::is_symlink(path) && fs::is_directory(path))
                         {
-                            workers.push_back(std::make_unique<Worker>(path, options, eventsBuffer, eventsBufferMutex));
+                            workers.push_back(std::make_unique<Worker>(false, path, options, eventsBuffer, eventsBufferMutex));
                         }
                     }
 
@@ -581,15 +584,16 @@ end_event_loop:
     }
 #endif
 
-{
-    std::lock_guard<std::mutex> lock(*eventsBufferMutex);
+    if (isRootWorker)
+    {
+        std::lock_guard<std::mutex> lock(*eventsBufferMutex);
 
-    auto change = std::make_unique<NotifyEvent>();
-    change->type = kStop;
-    change->path = basePath.string();
+        auto change = std::make_unique<NotifyEvent>();
+        change->type = kStop;
+        change->path = basePath.string();
 
-    eventsBuffer->push(std::move(change));
-}
+        eventsBuffer->push(std::move(change));
+    }
 }
 
 DirectoryWatcher::DirectoryWatcher()
@@ -610,7 +614,8 @@ bool DirectoryWatcher::Watch(const std::filesystem::path &absPath, const WatchOp
         return false;
     }
 
-    workers.push_back(std::make_unique<Worker>(absPath, options, eventsBuffer.get(), eventsBufferMutex.get()));
+    auto worker = std::make_unique<Worker>(true, absPath, options, eventsBuffer.get(), eventsBufferMutex.get());
+    workers.push_back(std::move(worker));
 
     return true;
 }

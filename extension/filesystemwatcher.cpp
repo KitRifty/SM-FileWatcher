@@ -67,12 +67,6 @@ bool SMDirectoryWatcher::Start()
 
     watching = true;
 
-    if (onStarted && onStarted->IsRunnable())
-    {
-        onStarted->PushCell(handle);
-        onStarted->Execute(nullptr);
-    }
-
     return true;
 }
 
@@ -85,12 +79,6 @@ void SMDirectoryWatcher::Stop()
 
     watching = false;
     StopWatching();
-
-    if (onStopped && onStopped->IsRunnable())
-    {
-        onStopped->PushCell(handle);
-        onStopped->Execute(nullptr);
-    }
 }
 
 void SMDirectoryWatcher::OnGameFrame(bool simulating)
@@ -198,6 +186,25 @@ void SMDirectoryWatcher::OnProcessEvent(const NotifyEvent &event)
             }
         }
 
+        break;
+    }
+    case kStart:
+    {
+        if (onStarted && onStarted->IsRunnable())
+        {
+            onStarted->PushCell(handle);
+            onStarted->Execute(nullptr);
+        }
+
+        break;
+    }
+    case kStop:
+    {
+        if (onStopped && onStopped->IsRunnable())
+        {
+            onStopped->PushCell(handle);
+            onStopped->Execute(nullptr);
+        }
         break;
     }
     }
