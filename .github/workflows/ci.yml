@@ -112,7 +112,7 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist
-          7z a dist/sm-filewatcher-${{ env.GITHUB_RELEASE_TAG }}-linux.tar.gz ./Linux/*
+          tar -C ./Linux -czf dist/sm-filewatcher-${{ env.GITHUB_RELEASE_TAG }}-linux.tar.gz .
           7z a dist/sm-filewatcher-${{ env.GITHUB_RELEASE_TAG }}-windows.zip ./Windows/*
 
       - name: Create release
