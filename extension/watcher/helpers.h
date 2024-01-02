@@ -8,7 +8,7 @@
  * This program is free software; you can redistribute it and/or modify it under
  * the terms of the GNU General Public License, version 3.0, as published by the
  * Free Software Foundation.
- * 
+ *
  * This program is distributed in the hope that it will be useful, but WITHOUT
  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
  * FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
@@ -27,6 +27,35 @@
  * or <http://www.sourcemod.net/license.php>.
  */
 
-#include <string>
+#ifndef HELPERS_H_
+#define HELPERS_H_
 
-std::string GetFileNameFromPath(const std::string & path);
+#ifdef __linux__
+#else
+#include <Windows.h>
+#endif
+
+#include <filesystem>
+
+inline bool IsSubPath(const std::filesystem::path &base, const std::filesystem::path &child)
+{
+	auto relative = child.lexically_relative(base);
+	return !relative.empty() && *relative.begin() != "..";
+}
+
+#ifdef __linux__
+#else
+
+struct ScopedHandle
+{
+	HANDLE handle;
+	ScopedHandle();
+	ScopedHandle(const HANDLE &h);
+	~ScopedHandle();
+	operator HANDLE() const;
+	HANDLE operator=(const HANDLE &h);
+};
+
+#endif // __linux__
+
+#endif // HELPERS_H_

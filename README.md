@@ -148,7 +148,7 @@ To detect changes, [`ReadDirectoryChangesW`](https://docs.microsoft.com/en-us/wi
 
 ## Renaming, moving, or deleting a watched directory
 
-For Windows, this is not allowed.
+For Windows, this is not allowed. If subdirectories are being watched, then directory symbolic links also cannot be renamed or deleted.
 
 For Linux, it is allowed, but the directory will no longer be watched.
 
@@ -164,7 +164,7 @@ For Linux, this is seen as a single Rename action.
 
 This is intentional behavior, but if you wish to handle these events consistently across platforms, consider handling Rename events as two separate Delete and Create events as both the old and new paths are given in the callback.
 
-> **Note**
+> [!NOTE]
 > This behavior difference does not apply when moving files ***in and out*** of a watched tree. As far as the watcher is concerned, they will be seen as Create and Delete actions respectively on both platforms.
 
 # License

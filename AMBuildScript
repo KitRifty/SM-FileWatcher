@@ -1,374 +1,400 @@
 # vim: set sts=2 ts=8 sw=2 tw=99 et ft=python:
-import os, sys
+import os
 
-# Simple extensions do not need to modify this file.
 
 def ResolveEnvPath(env, folder):
-  if env in os.environ:
-    path = os.environ[env]
-    if os.path.isdir(path):
-      return path
+    if env in os.environ:
+        path = os.environ[env]
+        if os.path.isdir(path):
+            return path
+        return None
+
+    head = os.getcwd()
+    oldhead = None
+    while head != None and head != oldhead:
+        path = os.path.join(head, folder)
+        if os.path.isdir(path):
+            return path
+        oldhead = head
+        head, tail = os.path.split(head)
+
     return None
 
-  head = os.getcwd()
-  oldhead = None
-  while head != None and head != oldhead:
-    path = os.path.join(head, folder)
-    if os.path.isdir(path):
-      return path
-    oldhead = head
-    head, tail = os.path.split(head)
-
-  return None
 
 def Normalize(path):
-  return os.path.abspath(os.path.normpath(path))
+    return os.path.abspath(os.path.normpath(path))
+
 
 def SetArchFlags(compiler):
-  if compiler.behavior == 'gcc':
-    if compiler.target.arch == 'x86_64':
-      compiler.cflags += ['-fPIC']
-  elif compiler.like('msvc'):
-    if compiler.target.arch == 'x86_64':
-      compiler.defines += ['WIN64']
+    if compiler.behavior == 'gcc':
+        if compiler.target.arch == 'x86_64':
+            compiler.cflags += ['-fPIC']
+    elif compiler.like('msvc'):
+        if compiler.target.arch == 'x86_64':
+            compiler.defines += ['WIN64']
+
 
 class ExtensionConfig(object):
-  def __init__(self):
-    self.binaries = []
-    self.extensions = []
-    self.generated_headers = None
-    self.sm_root = None
-    self.all_targets = []
-    self.target_archs = set()
+    def __init__(self):
+        self.binaries = []
+        self.extensions = []
+        self.generated_headers = None
+        self.sm_root = None
+        self.all_targets = []
+        self.target_archs = set()
 
-    if builder.options.targets:
-      target_archs = builder.options.targets.split(',')
-    else:
-      target_archs = ['x86']
-    
-    for arch in target_archs:
-      try:
-        cxx = builder.DetectCxx(target_arch = arch)
-        self.target_archs.add(cxx.target.arch)
-      except Exception as e:
-        # Error if archs were manually overridden.
         if builder.options.targets:
-          raise
-        print('Skipping target {}: {}'.format(arch, e))
-        continue
-      self.all_targets.append(cxx)
+            target_archs = builder.options.targets.split(',')
+        else:
+            target_archs = ['x86']
 
-    if not self.all_targets:
-        raise Exception('No suitable C/C++ compiler was found.')
+        for arch in target_archs:
+            try:
+                cxx = builder.DetectCxx(target_arch=arch)
+                self.target_archs.add(cxx.target.arch)
+            except Exception as e:
+                # Error if archs were manually overridden.
+                if builder.options.targets:
+                    raise
+                print('Skipping target {}: {}'.format(arch, e))
+                continue
+            self.all_targets.append(cxx)
 
-  def use_auto_versioning(self):
-    if builder.backend != 'amb2':
-      return False
-    return not getattr(builder.options, 'disable_auto_versioning', False)
+        if not self.all_targets:
+            raise Exception('No suitable C/C++ compiler was found.')
 
-  @property
-  def tag(self):
-    if builder.options.debug == '1':
-      return 'Debug'
-    return 'Release'
-  
-  def detectProductVersion(self):
-    builder.AddConfigureFile('product.version')
+    def use_auto_versioning(self):
+        if builder.backend != 'amb2':
+            return False
+        return not getattr(builder.options, 'disable_auto_versioning', False)
 
-    # For OS X dylib versioning
-    import re
-    with open(os.path.join(builder.sourcePath, 'product.version'), 'r') as fp:
-      productContents = fp.read()
-    m = re.match('(\d+)\.(\d+)\.(\d+).*', productContents)
-    if m == None:
-      self.productVersion = '1.0.0'
-    else:
-      major, minor, release = m.groups()
-      self.productVersion = '{0}.{1}.{2}'.format(major, minor, release)
+    @property
+    def tag(self):
+        if builder.options.debug == '1':
+            return 'Debug'
+        return 'Release'
 
-  def detectSDKs(self):
-    if builder.options.sm_path:
-      self.sm_root = builder.options.sm_path
-    else:
-      self.sm_root = ResolveEnvPath('SOURCEMOD18', 'sourcemod-1.8')
-      if not self.sm_root:
-        self.sm_root = ResolveEnvPath('SOURCEMOD', 'sourcemod')
-      if not self.sm_root:
-        self.sm_root = ResolveEnvPath('SOURCEMOD_DEV', 'sourcemod-central')
+    def detectProductVersion(self):
+        builder.AddConfigureFile('product.version')
 
-    if not self.sm_root or not os.path.isdir(self.sm_root):
-      raise Exception('Could not find a source copy of SourceMod')
-    self.sm_root = Normalize(self.sm_root)
+        # For OS X dylib versioning
+        import re
+        with open(os.path.join(builder.sourcePath, 'product.version'), 'r') as fp:
+            productContents = fp.read()
+        m = re.match('(\d+)\.(\d+)\.(\d+).*', productContents)
+        if m == None:
+            self.productVersion = '1.0.0'
+        else:
+            major, minor, release = m.groups()
+            self.productVersion = '{0}.{1}.{2}'.format(major, minor, release)
 
-  def configure(self):
-    if not set(self.target_archs).issubset(['x86', 'x86_64']):
-      raise Exception('Unknown target architecture: {0}'.format(self.target_archs))
+    def detectSDKs(self):
+        if builder.options.sm_path:
+            self.sm_root = builder.options.sm_path
+        else:
+            self.sm_root = ResolveEnvPath('SOURCEMOD18', 'sourcemod-1.8')
+            if not self.sm_root:
+                self.sm_root = ResolveEnvPath('SOURCEMOD', 'sourcemod')
+            if not self.sm_root:
+                self.sm_root = ResolveEnvPath(
+                    'SOURCEMOD_DEV', 'sourcemod-central')
 
-    for cxx in self.all_targets:
-      self.configure_cxx(cxx)
+        if not self.sm_root or not os.path.isdir(self.sm_root):
+            raise Exception('Could not find a source copy of SourceMod')
+        self.sm_root = Normalize(self.sm_root)
 
-  def configure_cxx(self, cxx):
-    if cxx.family == 'msvc':
-      if cxx.version < 1900:
-        raise Exception('Only MSVC 2015 and later are supported, c++14 support is required.')
-    if cxx.family == 'gcc':
-      if cxx.version < 'gcc-4.9':
-        raise Exception('Only GCC versions 4.9 or greater are supported, c++14 support is required.')
-    if cxx.family == 'clang':
-      if cxx.version < 'clang-3.4':
-        raise Exception('Only clang versions 3.4 or greater are supported, c++14 support is required.')
+    def configure(self):
+        if not set(self.target_archs).issubset(['x86', 'x86_64']):
+            raise Exception(
+                'Unknown target architecture: {0}'.format(self.target_archs))
 
-    if cxx.like('gcc'):
-      self.configure_gcc(cxx)
-    elif cxx.family == 'msvc':
-      self.configure_msvc(cxx)
+        for cxx in self.all_targets:
+            self.configure_cxx(cxx)
 
-    # Optimization
-    if builder.options.opt == '1':
-      cxx.defines += ['NDEBUG']
+    def configure_cxx(self, cxx):
+        if cxx.family == 'msvc':
+            if cxx.version < 1900:
+                raise Exception(
+                    'Only MSVC 2015 and later are supported, c++14 support is required.')
+        if cxx.family == 'gcc':
+            if cxx.version < 'gcc-4.9':
+                raise Exception(
+                    'Only GCC versions 4.9 or greater are supported, c++14 support is required.')
+        if cxx.family == 'clang':
+            if cxx.version < 'clang-3.4':
+                raise Exception(
+                    'Only clang versions 3.4 or greater are supported, c++14 support is required.')
 
-    # Debugging
-    if builder.options.debug == '1':
-      cxx.defines += ['DEBUG', '_DEBUG']
+        if cxx.like('gcc'):
+            self.configure_gcc(cxx)
+        elif cxx.family == 'msvc':
+            self.configure_msvc(cxx)
 
-    # Platform-specifics
-    if cxx.target.platform == 'linux':
-      self.configure_linux(cxx)
-    elif cxx.target.platform == 'mac':
-      self.configure_mac(cxx)
-    elif cxx.target.platform == 'windows':
-      self.configure_windows(cxx)
+        # Optimization
+        if builder.options.opt == '1':
+            cxx.defines += ['NDEBUG']
 
-    # Finish up.
-    cxx.includes += [
-      os.path.join(self.sm_root, 'public'),
-    ]
+        # Debugging
+        if builder.options.debug == '1':
+            cxx.defines += ['DEBUG', '_DEBUG']
 
-    if self.use_auto_versioning():
-      cxx.defines += ['SMEXT_GENERATED_BUILD']
-      cxx.includes += [
-        os.path.join(builder.buildPath, 'includes'),
-      ]
+        # Platform-specifics
+        if cxx.target.platform == 'linux':
+            self.configure_linux(cxx)
+        elif cxx.target.platform == 'mac':
+            self.configure_mac(cxx)
+        elif cxx.target.platform == 'windows':
+            self.configure_windows(cxx)
 
-  def configure_gcc(self, cxx):
-    cxx.defines += [
-      'stricmp=strcasecmp',
-      '_stricmp=strcasecmp',
-      '_snprintf=snprintf',
-      '_vsnprintf=vsnprintf',
-      'HAVE_STDINT_H',
-      'GNUC',
-    ]
-    cxx.cflags += [
-      '-pipe',
-      '-fno-strict-aliasing',
-      '-Wall',
-      '-Werror',
-      '-Wno-unused',
-      '-Wno-switch',
-      '-Wno-array-bounds',
-      '-msse',
-      '-m32',
-      '-fvisibility=hidden',
-    ]
-
-    if cxx.version == 'apple-clang-6.0' or cxx.version == 'clang-3.4':
-      cxx.cxxflags += ['-std=c++1y']
-    else:
-      cxx.cxxflags += ['-std=c++14']
-
-    cxx.cxxflags += [
-      '-fno-exceptions',
-      '-fno-threadsafe-statics',
-      '-Wno-non-virtual-dtor',
-      '-Wno-overloaded-virtual',
-      '-fvisibility-inlines-hidden',
-    ]
-    cxx.linkflags += ['-m32']
-
-    have_gcc = cxx.family == 'gcc'
-    have_clang = cxx.family == 'clang'
-    if cxx.version >= 'clang-3.9' or cxx.version == 'clang-3.4' or cxx.version > 'apple-clang-6.0':
-      cxx.cxxflags += ['-Wno-expansion-to-defined']
-    if cxx.version == 'clang-3.9' or cxx.version == 'apple-clang-8.0':
-      cxx.cflags += ['-Wno-varargs']
-    if cxx.version >= 'clang-3.4' or cxx.version >= 'apple-clang-7.0':
-      cxx.cxxflags += ['-Wno-inconsistent-missing-override']
-    if cxx.version >= 'clang-2.9' or cxx.version >= 'apple-clang-3.0':
-      cxx.cxxflags += ['-Wno-null-dereference']
-    if have_clang or (cxx.version >= 'gcc-4.6'):
-      cxx.cflags += ['-Wno-narrowing']
-    if have_clang or (cxx.version >= 'gcc-4.7'):
-      cxx.cxxflags += ['-Wno-delete-non-virtual-dtor']
-    if cxx.version >= 'gcc-4.8':
-      cxx.cflags += ['-Wno-unused-result']
-    if cxx.version >= 'gcc-9.0':
-      cxx.cxxflags += ['-Wno-class-memaccess', '-Wno-packed-not-aligned']
-    if have_clang:
-      cxx.cxxflags += ['-Wno-implicit-exception-spec-mismatch']
-      if cxx.version >= 'apple-clang-5.1' or cxx.version >= 'clang-3.4':
-        cxx.cxxflags += ['-Wno-deprecated-register']
-      else:
-        cxx.cxxflags += ['-Wno-deprecated']
-      cxx.cflags += ['-Wno-sometimes-uninitialized']
-
-    if have_gcc:
-      cxx.cflags += ['-mfpmath=sse']
-
-    if builder.options.opt == '1':
-      cxx.cflags += ['-O3']
-
-    # Don't omit the frame pointer.
-    cxx.cflags += ['-fno-omit-frame-pointer']
-
-  def configure_msvc(self, cxx):
-    if builder.options.debug == '1':
-      cxx.cflags += ['/MTd']
-      cxx.linkflags += ['/NODEFAULTLIB:libcmt']
-    else:
-      cxx.cflags += ['/MT']
-    cxx.defines += [
-      '_CRT_SECURE_NO_DEPRECATE',
-      '_CRT_SECURE_NO_WARNINGS',
-      '_CRT_NONSTDC_NO_DEPRECATE',
-      '_ITERATOR_DEBUG_LEVEL=0',
-    ]
-    cxx.cflags += [
-      '/W3',
-    ]
-    cxx.cxxflags += [
-      '/EHsc',
-      '/GR-',
-      '/TP',
-    ]
-    cxx.linkflags += [
-      '/MACHINE:X86',
-      'kernel32.lib',
-      'user32.lib',
-      'gdi32.lib',
-      'winspool.lib',
-      'comdlg32.lib',
-      'advapi32.lib',
-      'shell32.lib',
-      'ole32.lib',
-      'oleaut32.lib',
-      'uuid.lib',
-      'odbc32.lib',
-      'odbccp32.lib',
-    ]
-
-    if builder.options.opt == '1':
-      cxx.cflags += ['/Ox', '/Zo']
-      cxx.linkflags += ['/OPT:ICF', '/OPT:REF']
-
-    if builder.options.debug == '1':
-      cxx.cflags += ['/Od', '/RTC1']
-
-    # This needs to be after our optimization flags which could otherwise disable it.
-    # Don't omit the frame pointer.
-    cxx.cflags += ['/Oy-']
-
-  def configure_linux(self, cxx):
-    cxx.defines += ['_LINUX', 'POSIX']
-    cxx.linkflags += ['-Wl,--exclude-libs,ALL', '-lm']
-    if cxx.vendor == 'gcc':
-      cxx.linkflags += ['-static-libgcc']
-    elif cxx.vendor == 'clang':
-      cxx.linkflags += ['-lgcc_eh']
-
-  def configure_mac(self, cxx):
-    cxx.defines += ['OSX', '_OSX', 'POSIX']
-    cxx.cflags += ['-mmacosx-version-min=10.5']
-    cxx.linkflags += [
-      '-mmacosx-version-min=10.5',
-      '-arch', 'i386',
-      '-lstdc++',
-      '-stdlib=libstdc++',
-    ]
-    cxx.cxxflags += ['-stdlib=libstdc++']
-
-  def configure_windows(self, cxx):
-    cxx.defines += ['WIN32', '_WINDOWS']
-	
-  def AddVersioning(self, binary):
-    if binary.compiler.target.platform == 'mac':
-      if binary.type == 'library':
-        binary.compiler.postlink += [
-          '-compatibility_version', '1.0.0',
-          '-current_version', self.productVersion
+        # Finish up.
+        cxx.includes += [
+            os.path.join(self.sm_root, 'public'),
         ]
-    if self.use_auto_versioning():
-      binary.compiler.sourcedeps += self.generated_headers
-    return binary
 
-  def LibraryBuilder(self, compiler, name):
-    binary = compiler.Library(name)
-    self.AddVersioning(binary)
-    if binary.compiler.like('msvc'):
-      binary.compiler.linkflags += ['/SUBSYSTEM:WINDOWS']
-    return binary
-  
-  def StaticLibraryBuilder(self, compiler, name):
-    return compiler.StaticLibrary(name)
+        if self.use_auto_versioning():
+            cxx.defines += ['SMEXT_GENERATED_BUILD']
+            cxx.includes += [
+                os.path.join(builder.buildPath, 'includes'),
+            ]
 
-  def Library(self, context, compiler, name):
-    compiler = compiler.clone()
-    SetArchFlags(compiler)
-    return self.LibraryBuilder(compiler, name)
+    def configure_gcc(self, cxx):
+        cxx.defines += [
+            'stricmp=strcasecmp',
+            '_stricmp=strcasecmp',
+            '_snprintf=snprintf',
+            '_vsnprintf=vsnprintf',
+            'HAVE_STDINT_H',
+            'GNUC',
+        ]
+        cxx.cflags += [
+            '-pipe',
+            '-fno-strict-aliasing',
+            '-Wall',
+            '-Werror',
+            '-Wno-unused',
+            '-Wno-switch',
+            '-Wno-array-bounds',
+            '-fvisibility=hidden',
+        ]
 
-  def StaticLibrary(self, context, compiler, name):
-    compiler = compiler.clone()
-    SetArchFlags(compiler)
-    return self.StaticLibraryBuilder(compiler, name)
+        if cxx.target.arch in ['x86', 'x86_64']:
+            cxx.cflags += ['-msse']
 
-  def ConfigureForExtension(self, context, compiler):
-    compiler.cxxincludes += [
-      os.path.join(context.currentSourcePath),
-      os.path.join(context.currentSourcePath, 'sdk'),
-      os.path.join(self.sm_root, 'public'),
-      os.path.join(self.sm_root, 'public', 'extensions'),
-      os.path.join(self.sm_root, 'sourcepawn', 'include'),
-      os.path.join(self.sm_root, 'public', 'amtl', 'amtl'),
-      os.path.join(self.sm_root, 'public', 'amtl'),
-    ]
-    return compiler
+        cxx.cxxflags += [
+            '-fno-exceptions',
+            '-fno-threadsafe-statics',
+            '-Wno-non-virtual-dtor',
+            '-Wno-overloaded-virtual',
+            '-fvisibility-inlines-hidden',
+            '-std=c++17'
+        ]
+        
+        if builder.options.debug == '1':
+            cxx.cflags += ['-D_GLIBCXX_DEBUG']
 
-  def ExtLibrary(self, context, compiler, name):
-    binary = self.Library(context, compiler, name)
-    SetArchFlags(compiler)
-    self.ConfigureForExtension(context, binary.compiler)
-    return binary
+        have_gcc = cxx.family == 'gcc'
+        have_clang = cxx.family == 'clang'
+        if cxx.version >= 'clang-3.9' or cxx.version == 'clang-3.4' or cxx.version > 'apple-clang-6.0':
+            cxx.cxxflags += ['-Wno-expansion-to-defined']
+        if cxx.version == 'clang-3.9' or cxx.version == 'apple-clang-8.0':
+            cxx.cflags += ['-Wno-varargs']
+        if cxx.version >= 'clang-3.4' or cxx.version >= 'apple-clang-7.0':
+            cxx.cxxflags += ['-Wno-inconsistent-missing-override']
+        if cxx.version >= 'clang-2.9' or cxx.version >= 'apple-clang-3.0':
+            cxx.cxxflags += ['-Wno-null-dereference']
+        if have_clang or (cxx.version >= 'gcc-4.6'):
+            cxx.cflags += ['-Wno-narrowing']
+        if have_clang or (cxx.version >= 'gcc-4.7'):
+            cxx.cxxflags += ['-Wno-delete-non-virtual-dtor']
+        if cxx.version >= 'gcc-4.8':
+            cxx.cflags += ['-Wno-unused-result']
+        if cxx.version >= 'gcc-9.0':
+            cxx.cxxflags += ['-Wno-class-memaccess', '-Wno-packed-not-aligned']
+        if have_clang:
+            cxx.cxxflags += ['-Wno-implicit-exception-spec-mismatch']
+            if cxx.version >= 'apple-clang-5.1' or cxx.version >= 'clang-3.4':
+                cxx.cxxflags += ['-Wno-deprecated-register']
+            else:
+                cxx.cxxflags += ['-Wno-deprecated']
+            cxx.cflags += ['-Wno-sometimes-uninitialized']
 
-  def ConfigureForHL2(self, binary):
-    compiler = binary.compiler
+        if have_gcc:
+            cxx.cflags += ['-mfpmath=sse']
 
-    compiler.defines += ['META_NO_HL2SDK']
+        if builder.options.opt == '1':
+            cxx.cflags += ['-O3']
 
-    if compiler.like('msvc'):
-      compiler.defines += ['COMPILER_MSVC', 'COMPILER_MSVC32']
-    else:
-      compiler.defines += ['COMPILER_GCC']
+        # Don't omit the frame pointer.
+        cxx.cflags += ['-fno-omit-frame-pointer']
 
-    if builder.target_platform == 'linux':
-      compiler.linkflags += ['-lstdc++']
-    elif builder.target_platform == 'mac':
-      compiler.linkflags.append('-liconv')
+    def configure_msvc(self, cxx):
+        if builder.options.debug == '1':
+            cxx.cflags += ['/MTd']
+            cxx.linkflags += ['/NODEFAULTLIB:libcmt']
+        else:
+            cxx.cflags += ['/MT']
+        cxx.defines += [
+            '_CRT_SECURE_NO_DEPRECATE',
+            '_CRT_SECURE_NO_WARNINGS',
+            '_CRT_NONSTDC_NO_DEPRECATE',
+            '_ITERATOR_DEBUG_LEVEL=0'
+        ]
+        cxx.cflags += [
+            '/W3',
+        ]
+        cxx.cxxflags += [
+            '/EHsc',
+            '/GR-',
+            '/TP',
+            '/std:c++17'
+        ]
+        cxx.linkflags += [
+            'kernel32.lib',
+            'user32.lib',
+            'gdi32.lib',
+            'winspool.lib',
+            'comdlg32.lib',
+            'advapi32.lib',
+            'shell32.lib',
+            'ole32.lib',
+            'oleaut32.lib',
+            'uuid.lib',
+            'odbc32.lib',
+            'odbccp32.lib',
+        ]
 
-    return binary
+        if builder.options.opt == '1':
+            cxx.cflags += ['/Ox', '/Zo']
+            cxx.linkflags += ['/OPT:ICF', '/OPT:REF']
 
-  def HL2Library(self, context, name):
-    binary = context.compiler.Library(name)
-    self.ConfigureForExtension(context, binary.compiler)
-    return self.ConfigureForHL2(binary)
+        if builder.options.debug == '1':
+            cxx.cflags += ['/Od', '/RTC1']
 
-  def HL2Project(self, context, name):
-    project = context.compiler.LibraryProject(name)
-    self.ConfigureForExtension(context, project.compiler)
-    return project
+        # This needs to be after our optimization flags which could otherwise disable it.
+        # Don't omit the frame pointer.
+        cxx.cflags += ['/Oy-']
 
-  def HL2Config(self, project, name):
-    binary = project.Configure(name, '{0}'.format(self.tag))
-    return self.ConfigureForHL2(binary)
+    def configure_linux(self, cxx):
+        cxx.defines += ['_LINUX', 'POSIX']
+        cxx.linkflags += ['-Wl,--exclude-libs,ALL', '-lm']
+        if cxx.vendor == 'gcc':
+            cxx.linkflags += ['-static-libgcc']
+        elif cxx.vendor == 'clang':
+            cxx.linkflags += ['-lgcc_eh']
+
+    def configure_mac(self, cxx):
+        cxx.defines += ['OSX', '_OSX', 'POSIX']
+        cxx.cflags += ['-mmacosx-version-min=10.5']
+        cxx.linkflags += [
+            '-mmacosx-version-min=10.5',
+            '-arch', 'i386',
+            '-lstdc++',
+            '-stdlib=libstdc++',
+        ]
+        cxx.cxxflags += ['-stdlib=libstdc++']
+
+    def configure_windows(self, cxx):
+        cxx.defines += ['WIN32', '_WINDOWS', 'WIN32_LEAN_AND_MEAN']
+
+    def AddVersioning(self, binary):
+        if binary.compiler.target.platform == 'mac':
+            if binary.type == 'library':
+                binary.compiler.postlink += [
+                    '-compatibility_version', '1.0.0',
+                    '-current_version', self.productVersion
+                ]
+        if self.use_auto_versioning():
+            binary.compiler.sourcedeps += self.generated_headers
+        return binary
+
+    def LibraryBuilder(self, compiler, name):
+        binary = compiler.Library(name)
+        self.AddVersioning(binary)
+        if binary.compiler.like('msvc'):
+            binary.compiler.linkflags += ['/SUBSYSTEM:WINDOWS']
+        return binary
+
+    def ProgramBuilder(self, compiler, name):
+        binary = compiler.Program(name)
+        self.AddVersioning(binary)
+        if '-static-libgcc' in binary.compiler.linkflags:
+            binary.compiler.linkflags.remove('-static-libgcc')
+        if '-lgcc_eh' in binary.compiler.linkflags:
+            binary.compiler.linkflags.remove('-lgcc_eh')
+        if binary.compiler.like('gcc'):
+            binary.compiler.linkflags += ['-lstdc++', '-lpthread']
+        if binary.compiler.like('msvc'):
+            binary.compiler.linkflags += ['/SUBSYSTEM:CONSOLE']
+        return binary
+
+    def StaticLibraryBuilder(self, compiler, name):
+        return compiler.StaticLibrary(name)
+
+    def Library(self, context, compiler, name):
+        compiler = compiler.clone()
+        SetArchFlags(compiler)
+        return self.LibraryBuilder(compiler, name)
+
+    def Program(self, context, compiler, name):
+        compiler = compiler.clone()
+        SetArchFlags(compiler)
+        return self.ProgramBuilder(compiler, name)
+
+    def StaticLibrary(self, context, compiler, name):
+        compiler = compiler.clone()
+        SetArchFlags(compiler)
+        return self.StaticLibraryBuilder(compiler, name)
+
+    def ConfigureForExtension(self, context, compiler):
+        compiler.cxxincludes += [
+            os.path.join(context.currentSourcePath),
+            os.path.join(context.currentSourcePath, 'sdk'),
+            os.path.join(self.sm_root, 'public'),
+            os.path.join(self.sm_root, 'public', 'extensions'),
+            os.path.join(self.sm_root, 'sourcepawn', 'include'),
+            os.path.join(self.sm_root, 'public', 'amtl', 'amtl'),
+            os.path.join(self.sm_root, 'public', 'amtl'),
+        ]
+        return compiler
+
+    def ExtLibrary(self, context, compiler, name):
+        binary = self.Library(context, compiler, name)
+        SetArchFlags(compiler)
+        self.ConfigureForExtension(context, binary.compiler)
+        return binary
+
+    def ConfigureForHL2(self, context, binary):
+        compiler = binary.compiler
+
+        compiler.defines += ['META_NO_HL2SDK']
+
+        if compiler.like('msvc'):
+            compiler.defines += ['COMPILER_MSVC', 'COMPILER_MSVC32']
+        else:
+            compiler.defines += ['COMPILER_GCC']
+
+        if builder.target_platform == 'linux':
+            compiler.linkflags += ['-lstdc++']
+        elif builder.target_platform == 'mac':
+            compiler.linkflags.append('-liconv')
+
+        return binary
+
+    def HL2Library(self, context, compiler, name):
+        binary = self.Library(context, compiler, name)
+        self.ConfigureForExtension(context, binary.compiler)
+        return self.ConfigureForHL2(context, binary)
+
+    def HL2Project(self, context, name):
+        project = self.LibraryProject(name)
+        self.ConfigureForExtension(context, project.compiler)
+        return project
+
+    def HL2Config(self, project, context, compiler, name):
+        binary = project.Configure(
+            name, f'{self.tag} - {compiler.target.arch}')
+        return self.ConfigureForHL2(context, binary)
+
 
 Extension = ExtensionConfig()
 Extension.detectSDKs()
@@ -379,15 +405,24 @@ Extension.configure()
 builder.targets = builder.CloneableList(Extension.all_targets)
 
 if Extension.use_auto_versioning():
-  Extension.generated_headers = builder.Build(
-    'tools/Versioning',
-    { 'Extension': Extension }
-  )
+    Extension.generated_headers = builder.Build(
+        'tools/Versioning',
+        {'Extension': Extension}
+    )
 
-# Add additional buildscripts here
+Extension.libwatcher = builder.Build(
+    'extension/watcher/AMBuilder',
+    {'Extension': Extension}
+)
+
+Extension.tests = builder.Build(
+    'extension/tests/AMBuilder',
+    {'Extension': Extension}
+)
+
 BuildScripts = [
-  'extension/AMBuilder',
-  'PackageScript',
+    'extension/AMBuilder',
+    'PackageScript',
 ]
 
-builder.Build(BuildScripts, { 'Extension': Extension })
+builder.Build(BuildScripts, {'Extension': Extension})

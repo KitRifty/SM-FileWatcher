@@ -3,25 +3,32 @@ import os
 
 projectName = 'filewatcher'
 
-project = builder.LibraryProject(projectName)
+# smsdk_ext.cpp will be automatically added later
+sourceFiles = [
+    'extension.cpp',
+    'filesystemwatcher.cpp'
+]
 
 for cxx in builder.targets:
-  binary = Extension.ExtLibrary(builder, cxx, projectName + '.ext')
+    arch = cxx.target.arch
 
-  binary.sources += [
-    'extension.cpp',
-    'filesystemwatcher.cpp',
-    'helpers.cpp'
-  ]
-  
-  if os.path.isfile(os.path.join(builder.currentSourcePath, 'sdk', 'smsdk_ext.cpp')):
-    # Use the copy included in the project
-    binary.sources += [os.path.join('sdk', 'smsdk_ext.cpp')]
-  else:
-    # Use the copy included with SM 1.6 and newer
-    binary.sources += [os.path.join(Extension.sm_root, 'public', 'smsdk_ext.cpp')]
+    binary = Extension.ExtLibrary(builder, cxx, projectName + '.ext')
 
-  if binary.compiler.behavior == 'gcc':
-    binary.compiler.cxxflags += ['-Wno-invalid-offsetof']
+    if os.path.isfile(os.path.join(builder.currentSourcePath, 'sdk', 'smsdk_ext.cpp')):
+        # Use the copy included in the project
+        binary.sources += [os.path.join('sdk', 'smsdk_ext.cpp')]
+    else:
+        # Use the copy included with SM 1.6 and newer
+        binary.sources += [os.path.join(Extension.sm_root,
+                                        'public', 'smsdk_ext.cpp')]
 
-  Extension.extensions += [builder.Add(binary)]
+    binary.sources += sourceFiles
+
+    if binary.compiler.behavior == 'gcc':
+        binary.compiler.cxxflags += ['-Wno-invalid-offsetof']
+
+    binary.compiler.postlink += [
+        Extension.libwatcher[arch]
+    ]
+
+    Extension.extensions += [builder.Add(binary)]

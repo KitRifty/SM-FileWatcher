@@ -27,26 +27,75 @@
  * or <http://www.sourcemod.net/license.php>.
  */
 
-#include "extension.h"
-#include "filesystemwatcher.h"
+#include <iostream>
+#include <fstream>
+#include <filesystem>
+#include <random>
+#include <sstream>
+#include <gtest/gtest.h>
+#include "runner.h"
 
-FileWatcherExtension g_Extension;
+namespace fs = std::filesystem;
 
-SMEXT_LINK(&g_Extension);
-
-bool FileWatcherExtension::SDK_OnLoad(char *error, size_t maxlen, bool late)
+void WatchEventCollector::OnProcessEvent(const NotifyEvent &event)
 {
-    if (!g_FileSystemWatchers.SDK_OnLoad(error, maxlen))
-    {
-        return false;
-    }
-
-    sharesys->RegisterLibrary(myself, "filewatcher");
-
-    return true;
+    events.emplace_back(event);
 }
 
-void FileWatcherExtension::SDK_OnUnload()
+std::string generate_random_string(size_t length)
 {
-    g_FileSystemWatchers.SDK_OnUnload();
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    static const std::string chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+    std::uniform_int_distribution<> distribution(0, chars.size() - 1);
+
+    std::string result;
+    result.reserve(length);
+    for (size_t i = 0; i < length; ++i)
+    {
+        result += chars[distribution(gen)];
+    }
+    return result;
+}
+
+TempDir::TempDir()
+{
+#ifdef __linux
+    char temp[] = "/tmp/watchertestXXXXXX";
+    char *p = mkdtemp(temp);
+
+    if (p != nullptr)
+    {
+        path = p;
+    }
+#else
+    fs::path tempDir;
+    while (true)
+    {
+        tempDir = fs::temp_directory_path() / ("watchertest" + generate_random_string(6));
+        if (!fs::exists(tempDir))
+        {
+            if (fs::create_directories(tempDir))
+            {
+                path = tempDir;
+            }
+
+            break;
+        }
+    }
+#endif
+}
+
+TempDir::~TempDir()
+{
+    if (!path.empty())
+    {
+        fs::remove_all(path);
+    }
+}
+
+int main(int argc, char **argv)
+{
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
 }

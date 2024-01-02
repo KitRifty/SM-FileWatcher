@@ -13,44 +13,45 @@ jobs:
   build:
     name: Build
     runs-on: ${{ matrix.os }}
-  
+
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-18.04, windows-2019]
+        os: [ubuntu-20.04, windows-2019]
         include:
-          - os: ubuntu-18.04
-            target-archs: x86
-            
+          - os: ubuntu-20.04
+            target-archs: x86,x86_64
+
           - os: windows-2019
-            target-archs: x86
-    
+            target-archs: x86,x86_64
+
     env:
       SOURCEMOD_VERSION: '1.11'
 
     steps:
-      - uses: actions/setup-python@v2
+      - uses: actions/setup-python@v5
         name: Setup Python
         with:
           python-version: '3.10'
-          
+
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          
+
       - name: Install Linux packages
         if: runner.os == 'Linux'
         run: |
           sudo apt update
           sudo apt install -yq --no-install-recommends g++-multilib
-      
-      - uses: actions/checkout@v3
+
+      - uses: actions/checkout@v4
         name: Repository checkout
         with:
           fetch-depth: 0
+          submodules: recursive
           path: extension
-      
-      - uses: actions/checkout@v2
+
+      - uses: actions/checkout@v4
         name: Checkout SourceMod
         with:
           repository: alliedmodders/sourcemod
@@ -58,12 +59,12 @@ jobs:
           submodules: recursive
           path: sourcemod
 
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
         name: Checkout AMBuild
         with:
           repository: alliedmodders/ambuild
           path: ambuild
-      
+
       - name: Setup AMBuild
         shell: bash
         run: |
@@ -76,17 +77,19 @@ jobs:
           cd build
           python ../configure.py --enable-auto-versioning --enable-optimize --targets=${{ matrix.target-archs }}
           ambuild
-      
+
       - name: Upload artifact
-        if: github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && (startsWith(matrix.os, 'ubuntu-18.04') || startsWith(matrix.os, 'windows-2019'))
-        uses: actions/upload-artifact@v1
+        if: github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && (startsWith(matrix.os, 'ubuntu-20.04') || startsWith(matrix.os, 'windows-2019'))
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ runner.os }}
-          path: extension/build/package
-      
+          path: |
+            extension/build/package
+            !extension/build/package/tests/*
+
       - name: Upload artifact
         if: github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && strategy.job-index == 0
-        uses: actions/upload-artifact@v1
+        uses: actions/upload-artifact@v4
         with:
           name: versioning
           path: extension/build/includes
@@ -99,7 +102,7 @@ jobs:
 
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v4
 
       - name: Set release version
         run: |
@@ -108,15 +111,16 @@ jobs:
 
       - name: Package
         run: |
-          7z a sm-filewatcher-${{ env.GITHUB_RELEASE_TAG }}-linux.zip ./Linux/*
-          7z a sm-filewatcher-${{ env.GITHUB_RELEASE_TAG }}-windows.zip ./Windows/*
-  
+          mkdir -p dist
+          7z a dist/sm-filewatcher-${{ env.GITHUB_RELEASE_TAG }}-linux.tar.gz ./Linux/*
+          7z a dist/sm-filewatcher-${{ env.GITHUB_RELEASE_TAG }}-windows.zip ./Windows/*
+
       - name: Create release
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ env.GITHUB_RELEASE_TAG }}
-          file: '*.zip'
+          file: 'dist/*'
           file_glob: true
-          body: | 
+          body: |
             ${{ github.event.head_commit.message }}

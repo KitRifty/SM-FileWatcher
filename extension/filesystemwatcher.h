@@ -8,7 +8,7 @@
  * This program is free software; you can redistribute it and/or modify it under
  * the terms of the GNU General Public License, version 3.0, as published by the
  * Free Software Foundation.
- * 
+ *
  * This program is distributed in the hope that it will be useful, but WITHOUT
  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
  * FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
@@ -27,160 +27,73 @@
  * or <http://www.sourcemod.net/license.php>.
  */
 
-#ifndef _INCLUDE_FILESYSTEMWATCHER_H_
-#define _INCLUDE_FILESYSTEMWATCHER_H_
+#ifndef FILESYSTEMWATCHER_H_
+#define FILESYSTEMWATCHER_H_
 
-#include <am-platform.h>
-#include <string>
-#include <vector>
-#include <queue>
-#include <memory>
-#include <thread>
-#include <mutex>
-#include <map>
-
-#ifdef KE_WINDOWS
-#define WIN32_LEAN_AND_MEAN
-#include <Windows.h>
-#include <windef.h>
-#elif defined KE_LINUX
-#include <sys/inotify.h>
-#include <fcntl.h>
-#endif
+#include "watcher/watcher.h"
 
 #include <IPluginSys.h>
 #include <sp_vm_api.h>
 
-class FileSystemWatcher
+class SMDirectoryWatcher : public DirectoryWatcher
 {
 public:
-	enum NotifyFilters
-	{
-		FSW_NOTIFY_NONE = 0,
-		FSW_NOTIFY_CREATED = (1 << 0),
-		FSW_NOTIFY_DELETED = (1 << 1),
-		FSW_NOTIFY_MODIFIED = (1 << 2),
-		FSW_NOTIFY_RENAMED = (1 << 3)
-	};
+    SMDirectoryWatcher(const std::filesystem::path &relPath);
+    inline bool IsWatching() const { return watching; }
+    bool Start();
+    void Stop();
+
+    virtual void OnProcessEvent(const NotifyEvent &event) override;
 
 private:
-	class NotifyEvent
-	{
-	public:
-		enum NotifyEventType
-		{
-			FILESYSTEM = 0,
-			START,
-			EXIT
-		};
+    void OnGameFrame(bool simulating);
+    void OnPluginUnloaded(SourceMod::IPlugin *plugin);
 
-		NotifyEventType type;
-		NotifyFilters flags;
-#ifdef KE_LINUX
-		uint32_t cookie;
-#endif
-		std::string lastPath;
-		std::string path;
-	};
-
-	bool m_watching;
-	std::string m_relPath;
-	std::string m_path;
+    friend class SMDirectoryWatcherManager;
 
 public:
-	bool m_includeSubdirectories;
-	NotifyFilters m_notifyFilter;
-	size_t m_bufferSize;
-	int m_retryInterval;
+    const std::filesystem::path gamePath;
+    bool watching;
 
-	SourceMod::Handle_t m_Handle;
+    WatchOptions options;
 
-	SourcePawn::IPluginContext* m_owningContext;
-	SourcePawn::IPluginFunction* m_onStarted;
-	SourcePawn::IPluginFunction* m_onStopped;
-	SourcePawn::IPluginFunction* m_onCreated;
-	SourcePawn::IPluginFunction* m_onDeleted;
-	SourcePawn::IPluginFunction* m_onModified;
-	SourcePawn::IPluginFunction* m_onRenamed;
+    SourceMod::Handle_t handle;
 
-private:
-#ifdef KE_WINDOWS
-	HANDLE m_threadCancelEventHandle;
-#elif defined KE_LINUX
-	int m_threadCancelEventHandle;
-#endif
-
-	class ThreadConfig
-	{
-	public:
-		std::string root_path;
-		bool includeSubdirectories;
-		NotifyFilters notifyFilters;
-		size_t bufferSize;
-		int retryInterval;
-	};
-
-	std::thread m_thread;
-	std::mutex m_threadRunningMutex;
-	bool m_threadRunning;
-	std::mutex m_changeEventsMutex;
-	std::queue<std::unique_ptr<NotifyEvent>> m_changeEvents;
-	bool m_processingEvents;
-
-	FileSystemWatcher(const std::string &relPath);
-
-public:
-	~FileSystemWatcher();
-
-	bool IsWatching() const { return m_watching; }
-	size_t GetAbsolutePath(char* buffer, size_t bufferSize);
-	size_t GetRelativePath(char* buffer, size_t bufferSize);
-	bool Start();
-	void Stop();
-
-private:
-	void OnGameFrame(bool simulating);
-	void OnPluginUnloaded(SourceMod::IPlugin* plugin);
-
-	bool IsThreadRunning();
-	void SetThreadRunning(bool state);
-
-	void RequestCancelThread();
-
-	void ThreadProc(std::unique_ptr<ThreadConfig> data);
-
-	void ProcessEvents();
-
-	friend class FileSystemWatcherManager;
+    SourcePawn::IPluginContext *owningContext;
+    SourcePawn::IPluginFunction *onStarted;
+    SourcePawn::IPluginFunction *onStopped;
+    SourcePawn::IPluginFunction *onCreated;
+    SourcePawn::IPluginFunction *onDeleted;
+    SourcePawn::IPluginFunction *onModified;
+    SourcePawn::IPluginFunction *onRenamed;
 };
 
-class FileSystemWatcherManager : 
-	public SourceMod::IHandleTypeDispatch,
-	public SourceMod::IPluginsListener
+class SMDirectoryWatcherManager : public SourceMod::IHandleTypeDispatch,
+                                  public SourceMod::IPluginsListener
 {
-private:
-	static SourceMod::HandleType_t m_HandleType;
-	static sp_nativeinfo_t m_Natives[];
-
-	std::vector<FileSystemWatcher*> m_watchers;
-
 public:
-	FileSystemWatcherManager();
+    SMDirectoryWatcherManager();
 
-	bool SDK_OnLoad(char* error, int errorSize);
-	void SDK_OnUnload();
-	void OnGameFrame(bool simulating);
+    bool SDK_OnLoad(char *error, int errorSize);
+    void SDK_OnUnload();
+    void OnGameFrame(bool simulating);
 
-	SourceMod::Handle_t CreateWatcher(SourcePawn::IPluginContext* context, const std::string &path);
-	FileSystemWatcher* GetWatcher(SourceMod::Handle_t handle);
+    SourceMod::Handle_t CreateWatcher(SourcePawn::IPluginContext *context, const std::filesystem::path &path);
+    SMDirectoryWatcher *GetWatcher(SourceMod::Handle_t handle);
 
-	// IHandleTypeDispatch
-	virtual void OnHandleDestroy(SourceMod::HandleType_t type, void *object) override;
+    // IHandleTypeDispatch
+    virtual void OnHandleDestroy(SourceMod::HandleType_t type, void *object) override;
 
-	// IPluginsListener
-	virtual void OnPluginUnloaded(SourceMod::IPlugin* plugin) override;
+    // IPluginsListener
+    virtual void OnPluginUnloaded(SourceMod::IPlugin *plugin) override;
+
+private:
+    static SourceMod::HandleType_t m_HandleType;
+    static sp_nativeinfo_t m_Natives[];
+
+    std::vector<SMDirectoryWatcher *> m_watchers;
 };
 
-extern FileSystemWatcherManager g_FileSystemWatchers;
+extern SMDirectoryWatcherManager g_FileSystemWatchers;
 
-#endif
+#endif // FILESYSTEMWATCHER_H_

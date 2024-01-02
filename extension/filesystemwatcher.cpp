@@ -8,7 +8,7 @@
  * This program is free software; you can redistribute it and/or modify it under
  * the terms of the GNU General Public License, version 3.0, as published by the
  * Free Software Foundation.
- * 
+ *
  * This program is distributed in the hope that it will be useful, but WITHOUT
  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
  * FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
@@ -28,1334 +28,628 @@
  */
 
 #include "filesystemwatcher.h"
+#include <cstring>
 #include "smsdk_ext.h"
-#include <locale>
-#include <codecvt>
-#include <am-string.h>
-#include <os/am-fsutil.h>
-#include <os/am-path.h>
 
-#ifdef KE_LINUX
-#include <sys/eventfd.h>
-#include <poll.h>
-#endif
-
-#include "helpers.h"
-
-FileSystemWatcher::FileSystemWatcher(const std::string &relPath) :
-	m_watching(false),
-	m_includeSubdirectories(false),
-	m_notifyFilter(FSW_NOTIFY_NONE),
-	m_bufferSize(8192),
-	m_retryInterval(1000),
-	m_Handle(0),
-	m_owningContext(nullptr),
-	m_onStarted(nullptr),
-	m_onStopped(nullptr),
-	m_onCreated(nullptr),
-	m_onDeleted(nullptr),
-	m_onModified(nullptr),
-	m_onRenamed(nullptr),
-#ifdef KE_WINDOWS
-	m_threadCancelEventHandle(nullptr),
-#elif defined KE_LINUX
-	m_threadCancelEventHandle(-1),
-#endif
-	m_thread(),
-	m_threadRunning(false),
-	m_processingEvents(false)
-{
-	char buffer[PLATFORM_MAX_PATH];
-	ke::path::Format(buffer, sizeof(buffer), relPath.c_str());
-	m_relPath = buffer;
-
-	if (!m_relPath.empty() && (m_relPath.back() != '/' && m_relPath.back() != '\\'))
-	{
-#ifdef KE_WINDOWS
-		m_relPath.push_back('\\');
-#else
-		m_relPath.push_back('/');
-#endif
-	}
-
-	g_pSM->BuildPath(Path_Game, buffer, sizeof(buffer), "%s", m_relPath.c_str());
-
-	m_path = buffer;
-}
-
-FileSystemWatcher::~FileSystemWatcher()
-{
-	Stop();
-
-#ifdef KE_WINDOWS
-	if (m_threadCancelEventHandle)
-	{
-		CloseHandle(m_threadCancelEventHandle);
-	}
-#elif defined KE_LINUX
-	if (fcntl(m_threadCancelEventHandle, F_GETFD) != -1)
-	{
-		close(m_threadCancelEventHandle);	
-	}
-#endif
-}
-
-bool FileSystemWatcher::Start()
-{
-	if (IsWatching())
-	{
-		return true;
-	}
-
-	std::unique_ptr<ThreadConfig> config = std::make_unique<ThreadConfig>();
-	config->root_path = m_path;
-	config->includeSubdirectories = m_includeSubdirectories;
-	config->notifyFilters = m_notifyFilter;
-	config->bufferSize = m_bufferSize;
-	config->retryInterval = m_retryInterval;
-
-#ifdef KE_WINDOWS
-	if (!m_threadCancelEventHandle)
-	{
-		m_threadCancelEventHandle = CreateEvent(nullptr, TRUE, FALSE, nullptr);
-	}
-	else
-	{
-		ResetEvent(m_threadCancelEventHandle);
-	}
-#elif defined KE_LINUX
-	if (fcntl(m_threadCancelEventHandle, F_GETFD) == -1)
-	{
-		m_threadCancelEventHandle = eventfd(0, 0);
-	}
-	else
-	{
-		uint64_t u;
-		read(m_threadCancelEventHandle, &u, sizeof(u));
-	}
-#endif
-
-	m_watching = true;
-	m_thread = std::thread(&FileSystemWatcher::ThreadProc, this, std::move(config));
-
-	return true;
-}
-
-size_t FileSystemWatcher::GetAbsolutePath(char* buffer, size_t bufferSize)
-{
-	return ke::SafeStrcpy(buffer, bufferSize, m_path.c_str());
-}
-
-size_t FileSystemWatcher::GetRelativePath(char* buffer, size_t bufferSize)
-{
-	return ke::SafeStrcpy(buffer, bufferSize, m_relPath.c_str());
-}
-
-void FileSystemWatcher::Stop()
-{
-	if (!IsWatching())
-	{
-		return;
-	}
-
-	m_watching = false;
-
-	RequestCancelThread();
-
-	if (m_thread.joinable())
-	{
-		m_thread.join();
-	}
-
-	ProcessEvents();
-}
-
-void FileSystemWatcher::OnGameFrame(bool simulating)
-{
-	if (IsWatching())
-	{
-		ProcessEvents();
-	}
-}
-
-void FileSystemWatcher::OnPluginUnloaded(SourceMod::IPlugin* plugin)
-{
-	IPluginContext* context = plugin->GetBaseContext();
-
-	if (m_owningContext == context)
-	{
-		m_owningContext = nullptr;
-		Stop();
-	}
-
-	if (m_onStarted && m_onStarted->GetParentContext() == context)
-	{
-		m_onStarted = nullptr;
-	}
-
-	if (m_onStopped && m_onStopped->GetParentContext() == context)
-	{
-		m_onStopped = nullptr;
-	}
-
-	if (m_onCreated && m_onCreated->GetParentContext() == context)
-	{
-		m_onCreated = nullptr;
-	}
-
-	if (m_onDeleted && m_onDeleted->GetParentContext() == context)
-	{
-		m_onDeleted = nullptr;
-	}
-
-	if (m_onModified && m_onModified->GetParentContext() == context)
-	{
-		m_onModified = nullptr;
-	}
-
-	if (m_onRenamed && m_onRenamed->GetParentContext() == context)
-	{
-		m_onRenamed = nullptr;
-	}
-}
-
-bool FileSystemWatcher::IsThreadRunning()
-{
-	std::lock_guard<std::mutex> lock(m_threadRunningMutex);
-	return m_threadRunning;
-}
-
-void FileSystemWatcher::SetThreadRunning(bool state)
-{
-	std::lock_guard<std::mutex> lock(m_threadRunningMutex);
-	m_threadRunning = state;
-}
-
-void FileSystemWatcher::RequestCancelThread()
-{
-#ifdef KE_WINDOWS
-	SetEvent(m_threadCancelEventHandle);
-#elif defined KE_LINUX
-	uint64_t u = 1;
-	write(m_threadCancelEventHandle, &u, sizeof(u));
-#endif
-}
-
-void FileSystemWatcher::ThreadProc(std::unique_ptr<ThreadConfig> config)
-{
-	class ThreadData
-	{
-	public:
-#ifdef KE_WINDOWS
-		HANDLE directory;
-		HANDLE changeEvent;
-#elif defined KE_LINUX
-		int fd;
-		int root_wd;
-		std::map<int, std::string> wd;
-		uint32_t mask;
-#endif
-
-		ThreadData()
-		{
-#ifdef KE_WINDOWS
-			directory = INVALID_HANDLE_VALUE;
-			changeEvent = nullptr;
-#elif defined KE_LINUX
-			fd = -1;
-			root_wd = -1;
-			mask = 0;
-#endif
-		}
-
-		~ThreadData()
-		{
-#ifdef KE_WINDOWS
-		if (changeEvent && changeEvent != INVALID_HANDLE_VALUE)
-		{
-			CloseHandle(changeEvent);
-		}
-
-		if (directory && directory != INVALID_HANDLE_VALUE)
-		{
-			CloseHandle(directory);
-		}
-#elif defined KE_LINUX
-		if (fcntl(fd, F_GETFD) != -1)
-		{
-			for (auto it = wd.begin(); it != wd.end(); it++)
-			{
-				inotify_rm_watch(fd, it->first);
-			}
-
-			close(fd);
-		}
-#endif
-		}
-
-#if defined KE_LINUX
-		int AddWatch(const std::unique_ptr<ThreadConfig> &config, const std::string &path, uint32_t _mask = 0)
-		{
-			int _wd = -1;
-			_mask |= mask;
-			
-			std::string absPath(config->root_path);
-			absPath.append(path);
-
-			_wd = inotify_add_watch(fd, absPath.c_str(), _mask);
-			if (_wd != -1)
-			{
-				auto it = wd.find(_wd);
-				if (it != wd.end())
-				{
-					wd.erase(it);
-				}
-				
-				wd.emplace(_wd, path);
-			}
-
-			if (config->includeSubdirectories)
-			{
-				DIR *dir;
-				dirent *ent;
-				if ((dir = opendir(absPath.c_str())) != nullptr) 
-				{
-					while ((ent = readdir(dir)) != nullptr)
-					{
-						if (ent->d_type == DT_DIR && ent->d_name[0] != '.')
-						{
-							std::string dirPath(path);
-							dirPath.append(ent->d_name);
-							dirPath.push_back('/');
-
-							AddWatch(config, dirPath, mask);
-						}
-					}
-
-					closedir(dir);
-				}
-			}
-
-			return _wd;
-		}
-#endif
-	};
-
-	bool isRunning = true;
-
-	while (isRunning)
-	{
-		SetThreadRunning(true);
-
-		bool didStart = false;
-
-		std::unique_ptr<ThreadData> data = std::make_unique<ThreadData>();
-		std::unique_ptr<char[]> buffer(new char[config->bufferSize]);
-
-		if (!ke::file::IsDirectory(config->root_path.c_str()))
-		{
-			goto terminate;
-		}
-
-#ifdef KE_WINDOWS
-		DWORD dwNotifyFilter = 0;
-
-		if (config->notifyFilters & (FSW_NOTIFY_RENAMED | FSW_NOTIFY_CREATED | FSW_NOTIFY_DELETED))
-		{
-			dwNotifyFilter |= FILE_NOTIFY_CHANGE_FILE_NAME;
-			dwNotifyFilter |= FILE_NOTIFY_CHANGE_DIR_NAME;
-		}
-		
-		if (config->notifyFilters & FSW_NOTIFY_MODIFIED)
-		{
-			dwNotifyFilter |= FILE_NOTIFY_CHANGE_LAST_WRITE;
-		}
-		
-		data->directory = CreateFileA(
-			config->root_path.c_str(),
-			FILE_LIST_DIRECTORY | GENERIC_READ,
-			FILE_SHARE_READ | FILE_SHARE_WRITE,
-			nullptr,
-			OPEN_EXISTING,
-			FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
-			nullptr);
-
-		if (data->directory == INVALID_HANDLE_VALUE)
-		{
-			goto terminate;
-		}
-#elif defined KE_LINUX
-		data->fd = inotify_init1(IN_NONBLOCK);
-		if (data->fd == -1)
-		{
-			goto terminate;
-		}
-
-		data->mask = 0;
-
-		if (config->includeSubdirectories)
-		{
-			data->mask |= (IN_CREATE | IN_MOVE);
-		}
-		else
-		{
-			if (config->notifyFilters & FSW_NOTIFY_CREATED)
-			{
-				data->mask |= IN_CREATE;
-			}
-
-			if (config->notifyFilters & FSW_NOTIFY_RENAMED)
-			{
-				data->mask |= IN_MOVE;
-			}
-		}
-
-		if (config->notifyFilters & FSW_NOTIFY_DELETED)
-		{
-			data->mask |= IN_DELETE;
-		}
-
-		if (config->notifyFilters & FSW_NOTIFY_MODIFIED)
-		{
-			data->mask |= IN_CLOSE_WRITE;
-		}
-
-		data->root_wd = data->AddWatch(config, "", IN_DELETE_SELF | IN_MOVE_SELF);
-		if (data->root_wd == -1)
-		{
-			goto terminate;
-		}
-#endif
-
-		didStart = true;
-
-		{
-			std::lock_guard<std::mutex> lock(m_changeEventsMutex);
-
-			auto ev = std::make_unique<NotifyEvent>();
-			ev->type = NotifyEvent::NotifyEventType::START;
-			m_changeEvents.push(std::move(ev));
-		}
-
-#ifdef KE_WINDOWS
-		data->changeEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
-
-		HANDLE waitHandles[2];
-		waitHandles[0] = data->changeEvent;
-		waitHandles[1] = m_threadCancelEventHandle;
-
-		OVERLAPPED overlapped;
-		ZeroMemory(&overlapped, sizeof overlapped);
-		overlapped.hEvent = data->changeEvent;
-
-		while (true)
-		{
-			if (!ReadDirectoryChangesExW(data->directory,
-				buffer.get(),
-				config->bufferSize,
-				config->includeSubdirectories,
-				dwNotifyFilter,
-				nullptr,
-				&overlapped,
-				nullptr,
-				ReadDirectoryNotifyExtendedInformation))
-			{
-				goto terminate;
-			}
-
-			switch (WaitForMultipleObjects(2, waitHandles, FALSE, INFINITE))
-			{
-				case WAIT_OBJECT_0:
-				{
-					DWORD dwBytes = 0;
-					if (!GetOverlappedResult(data->directory, &overlapped, &dwBytes, TRUE))
-					{
-						goto terminate;
-					}
-
-					ResetEvent(data->changeEvent);
-
-					if (dwBytes == 0)
-					{
-						break;
-					}
-
-					std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
-					std::vector<std::unique_ptr<NotifyEvent>> queuedEvents;
-
-					char *p = buffer.get();
-					for (;;)
-					{
-						FILE_NOTIFY_EXTENDED_INFORMATION* info = reinterpret_cast<FILE_NOTIFY_EXTENDED_INFORMATION*>(p);
-
-						std::wstring fileName(info->FileName, info->FileNameLength / sizeof(wchar_t));
-
-						switch (info->Action)
-						{
-							case FILE_ACTION_ADDED:
-							{
-								if (config->notifyFilters & (FSW_NOTIFY_CREATED | FSW_NOTIFY_RENAMED))
-								{
-									std::string path = converter.to_bytes(fileName);
-
-									if (!queuedEvents.empty())
-									{
-										bool isRenameEvent = false;
-
-										for (auto it = queuedEvents.rbegin(); it != queuedEvents.rend(); it++)
-										{
-											auto &change = *it;
-
-											if (change->flags == FSW_NOTIFY_DELETED)
-											{
-												std::string me = GetFileNameFromPath(path);
-												std::string them = GetFileNameFromPath(change->path);
-
-												if (me == them)
-												{
-													change->flags = FSW_NOTIFY_RENAMED;
-													change->lastPath = change->path;
-													change->path = path;
-
-													isRenameEvent = true;
-													break;
-												}
-											}
-										}
-
-										if (isRenameEvent)
-										{
-											break;
-										}
-									}
-
-									auto change = std::make_unique<NotifyEvent>();
-									change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
-									change->flags = FSW_NOTIFY_CREATED;
-									change->path = path;
-
-									queuedEvents.push_back(std::move(change));
-								}
-
-								break;
-							}
-							case FILE_ACTION_REMOVED:
-							{
-								if (config->notifyFilters & (FSW_NOTIFY_DELETED | FSW_NOTIFY_RENAMED))
-								{
-									auto change = std::make_unique<NotifyEvent>();
-									change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
-									change->flags = FSW_NOTIFY_DELETED;
-									change->path = converter.to_bytes(fileName);
-
-									queuedEvents.push_back(std::move(change));
-								}
-								
-								break;
-							}
-							case FILE_ACTION_MODIFIED:
-							{
-								if (config->notifyFilters & FSW_NOTIFY_MODIFIED)
-								{
-									if (info->FileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-									{
-										break;
-									}
-
-									std::string path = converter.to_bytes(fileName);
-
-									std::string absPath(config->root_path);
-									absPath.append(path);
-
-									auto change = std::make_unique<NotifyEvent>();
-									change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
-									change->flags = FSW_NOTIFY_MODIFIED;
-									change->path = path;
-
-									queuedEvents.push_back(std::move(change));
-								}
-
-								break;
-							}
-							case FILE_ACTION_RENAMED_OLD_NAME:
-							{
-								if (config->notifyFilters & FSW_NOTIFY_RENAMED)
-								{
-									auto change = std::make_unique<NotifyEvent>();
-									change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
-									change->flags = FSW_NOTIFY_RENAMED;
-									change->lastPath = converter.to_bytes(fileName);
-
-									queuedEvents.push_back(std::move(change));
-								}
-								
-								break;
-							}
-							case FILE_ACTION_RENAMED_NEW_NAME:
-							{
-								if (config->notifyFilters & FSW_NOTIFY_RENAMED)
-								{
-									auto &change = queuedEvents.back();
-									change->path = converter.to_bytes(fileName);
-								}
-								
-								break;
-							}
-						}
-
-						if (!info->NextEntryOffset)
-						{
-							break;
-						}
-
-						p += info->NextEntryOffset;
-					}
-
-					std::lock_guard<std::mutex> lock(m_changeEventsMutex);
-
-					for (auto it = queuedEvents.begin(); it != queuedEvents.end(); it++)
-					{
-						auto &change = *it;
-						if (change->flags & config->notifyFilters)
-						{
-							m_changeEvents.push(std::move(*it));
-						}
-					}
-
-					break;
-				}
-				case WAIT_OBJECT_0 + 1:
-				{
-					isRunning = false;
-					goto terminate;
-				}
-				default:
-				{
-					goto terminate;
-				}
-			}
-		}
-#elif defined KE_LINUX
-		pollfd fds[2];
-
-		fds[0].fd = data->fd;
-		fds[0].events = POLLIN;
-
-		fds[1].fd = m_threadCancelEventHandle;
-		fds[1].events = POLLIN;
-
-		while (true)
-		{
-			if (poll(fds, 2, -1) > 0)
-			{
-				if (fds[1].revents & POLLIN)
-				{
-					isRunning = false;
-					goto terminate;
-				}
-
-				if (fds[0].revents & POLLIN)
-				{
-					std::vector<std::unique_ptr<NotifyEvent>> queuedEvents;
-
-					for (;;)
-					{
-						ssize_t len = read(data->fd, buffer.get(), config->bufferSize);
-						
-						if (len == -1 && errno != EAGAIN) 
-						{
-							goto terminate;
-						}
-
-						if (len <= 0)
-						{
-							break;
-						}
-
-						const inotify_event* event;
-						for (char* p = buffer.get(); p < buffer.get() + len; p += sizeof(inotify_event) + event->len)
-						{
-							event = (const inotify_event*)p;
-
-							if (event->mask & (IN_MOVE_SELF | IN_DELETE_SELF | IN_IGNORED))
-							{
-								auto it = data->wd.find(event->wd);
-								if (it != data->wd.end())
-								{
-									if (event->mask & IN_MOVE_SELF)
-									{
-										inotify_rm_watch(data->fd, event->wd);
-									}
-
-									data->wd.erase(it);
-								}
-
-								if (event->wd == data->root_wd)
-								{
-									goto terminate;
-								}
-								else
-								{
-									continue;
-								}
-							}
-
-							std::string &baseRelPath = data->wd.at(event->wd);
-
-							if (event->mask & (IN_CREATE | IN_MOVED_TO))
-							{
-								if (config->includeSubdirectories && (event->mask & IN_ISDIR))
-								{
-									std::string relPath(baseRelPath);
-									relPath.append(event->name);
-									relPath.push_back('/');
-
-									data->AddWatch(config, relPath);
-								}
-
-								if (event->mask & IN_MOVED_TO)
-								{
-									bool foundRenamedEvent = false;
-
-									for (auto it = queuedEvents.rbegin(); it != queuedEvents.rend(); it++)
-									{
-										auto &change = *it;
-										if (change->cookie == event->cookie)
-										{
-											change->flags = FSW_NOTIFY_RENAMED;
-											change->cookie = 0;
-											change->lastPath = change->path;
-											change->path = baseRelPath;
-											change->path.append(event->name);
-
-											foundRenamedEvent = true;
-											break;
-										}
-									}
-
-									if (foundRenamedEvent)
-									{
-										continue;
-									}
-								}
-
-								std::unique_ptr<NotifyEvent> change = std::make_unique<NotifyEvent>();
-								change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
-								change->flags = FSW_NOTIFY_CREATED;
-								change->cookie = event->cookie;
-								change->path = baseRelPath;
-								change->path.append(event->name);
-
-								queuedEvents.push_back(std::move(change));
-							}
-
-							if (event->mask & (IN_DELETE | IN_MOVED_FROM))
-							{
-								if (event->mask & IN_MOVED_FROM)
-								{
-									bool foundRenamedEvent = false;
-
-									for (auto it = queuedEvents.rbegin(); it != queuedEvents.rend(); it++)
-									{
-										auto &change = *it;
-										if (change->cookie == event->cookie)
-										{
-											change->flags = FSW_NOTIFY_RENAMED;
-											change->cookie = 0;
-											change->lastPath = change->path;
-											change->path = baseRelPath;
-											change->path.append(event->name);
-
-											foundRenamedEvent = true;
-											break;
-										}
-									}
-
-									if (foundRenamedEvent)
-									{
-										continue;
-									}
-								}
-
-								std::unique_ptr<NotifyEvent> change = std::make_unique<NotifyEvent>();
-								change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
-								change->flags = FSW_NOTIFY_DELETED;
-								change->cookie = event->cookie;
-								change->path = baseRelPath;
-								change->path.append(event->name);
-
-								queuedEvents.push_back(std::move(change));
-							}
-
-							if (event->mask & IN_CLOSE_WRITE)
-							{
-								if (config->notifyFilters & FSW_NOTIFY_MODIFIED)
-								{
-									std::unique_ptr<NotifyEvent> change = std::make_unique<NotifyEvent>();
-									change->type = NotifyEvent::NotifyEventType::FILESYSTEM;
-									change->flags = FSW_NOTIFY_MODIFIED;
-									change->cookie = event->cookie;
-									change->path = baseRelPath;
-									change->path.append(event->name);
-
-									queuedEvents.push_back(std::move(change));
-								}
-							}
-						}
-					}
-
-					std::lock_guard<std::mutex> lock(m_changeEventsMutex);
-
-					for (auto it = queuedEvents.begin(); it != queuedEvents.end(); it++)
-					{
-						auto &change = *it;
-						if (change->flags & config->notifyFilters)
-						{
-							m_changeEvents.push(std::move(*it));
-						}
-					}
-				}
-			}
-		}
-#endif
-
-terminate:
-		SetThreadRunning(false);
-
-		if (didStart)
-		{
-			std::lock_guard<std::mutex> lock(m_changeEventsMutex);
-
-			auto ev = std::make_unique<NotifyEvent>();
-			ev->type = NotifyEvent::NotifyEventType::EXIT;
-			m_changeEvents.push(std::move(ev));
-		}
-
-		if (isRunning)
-		{
-#ifdef KE_WINDOWS
-			switch (WaitForSingleObject(m_threadCancelEventHandle, config->retryInterval))
-			{
-				case WAIT_OBJECT_0:
-				{
-					isRunning = false;
-					break;
-				}
-			}
-#elif defined KE_LINUX
-			pollfd retry_fds[1];
-
-			retry_fds[0].fd = m_threadCancelEventHandle;
-			retry_fds[0].events = POLLIN;
-
-			if (poll(retry_fds, 1, config->retryInterval) > 0)
-			{
-				if (retry_fds[0].revents & POLLIN)
-				{
-					isRunning = false;
-				}
-			}
-#endif
-		}
-	}
-}
-
-void FileSystemWatcher::ProcessEvents()
-{
-	if (m_processingEvents)
-	{
-		return;
-	}
-
-	std::lock_guard<std::mutex> lock(m_changeEventsMutex);
-
-	m_processingEvents = true;
-
-	while (!m_changeEvents.empty())
-	{
-		std::unique_ptr<NotifyEvent> &front = m_changeEvents.front();
-
-		switch (front->type)
-		{
-			case NotifyEvent::NotifyEventType::FILESYSTEM:
-			{
-				if (front->flags & FSW_NOTIFY_CREATED)
-				{
-					if (m_onCreated && m_onCreated->IsRunnable())
-					{
-						m_onCreated->PushCell(m_Handle);
-						m_onCreated->PushString(front->path.c_str());
-						m_onCreated->Execute(nullptr);
-					}
-				}
-
-				if (front->flags & FSW_NOTIFY_DELETED)
-				{
-					if (m_onDeleted && m_onDeleted->IsRunnable())
-					{
-						m_onDeleted->PushCell(m_Handle);
-						m_onDeleted->PushString(front->path.c_str());
-						m_onDeleted->Execute(nullptr);
-					}
-				}
-
-				if (front->flags & FSW_NOTIFY_MODIFIED)
-				{
-					if (m_onModified && m_onModified->IsRunnable())
-					{
-						m_onModified->PushCell(m_Handle);
-						m_onModified->PushString(front->path.c_str());
-						m_onModified->Execute(nullptr);
-					}
-				}
-
-				if (front->flags & FSW_NOTIFY_RENAMED)
-				{
-					if (m_onRenamed && m_onRenamed->IsRunnable())
-					{
-						m_onRenamed->PushCell(m_Handle);
-						m_onRenamed->PushString(front->lastPath.c_str());
-						m_onRenamed->PushString(front->path.c_str());
-						m_onRenamed->Execute(nullptr);
-					}
-				}
-
-				break;
-			}
-			case NotifyEvent::NotifyEventType::START:
-			{
-				if (m_onStarted && m_onStarted->IsRunnable())
-				{
-					m_onStarted->PushCell(m_Handle);
-					m_onStarted->Execute(nullptr);
-				}
-
-				break;
-			}
-			case NotifyEvent::NotifyEventType::EXIT:
-			{
-				if (m_onStopped && m_onStopped->IsRunnable())
-				{
-					m_onStopped->PushCell(m_Handle);
-					m_onStopped->Execute(nullptr);
-				}
-
-				break;
-			}
-		}
-
-		m_changeEvents.pop();
-	}
-
-	m_processingEvents = false;
-}
-
-FileSystemWatcherManager g_FileSystemWatchers;
-SourceMod::HandleType_t FileSystemWatcherManager::m_HandleType(0);
-
-FileSystemWatcherManager::FileSystemWatcherManager()
+namespace fs = std::filesystem;
+
+SMDirectoryWatcher::SMDirectoryWatcher(const fs::path &path)
+    : DirectoryWatcher(),
+      gamePath(fs::path(path).lexically_normal()),
+      watching(false),
+      options{false, true, kNone, 8192},
+      handle(0),
+      owningContext(nullptr),
+      onStarted(nullptr),
+      onStopped(nullptr),
+      onCreated(nullptr),
+      onDeleted(nullptr),
+      onModified(nullptr),
+
+      onRenamed(nullptr)
 {
 }
+
+bool SMDirectoryWatcher::Start()
+{
+    if (IsWatching())
+    {
+        return true;
+    }
+
+    fs::path absPath(g_pSM->GetGamePath());
+    absPath = absPath.lexically_normal() / gamePath;
+
+    if (!Watch(absPath, options))
+    {
+        return false;
+    }
+
+    watching = true;
+
+    return true;
+}
+
+void SMDirectoryWatcher::Stop()
+{
+    if (!IsWatching())
+    {
+        return;
+    }
+
+    watching = false;
+    StopWatching();
+}
+
+void SMDirectoryWatcher::OnGameFrame(bool simulating)
+{
+    if (IsWatching())
+    {
+        ProcessEvents();
+    }
+}
+
+void SMDirectoryWatcher::OnPluginUnloaded(SourceMod::IPlugin *plugin)
+{
+    IPluginContext *context = plugin->GetBaseContext();
+
+    if (owningContext == context)
+    {
+        owningContext = nullptr;
+        Stop();
+    }
+
+    if (onStarted && onStarted->GetParentContext() == context)
+    {
+        onStarted = nullptr;
+    }
+
+    if (onStopped && onStopped->GetParentContext() == context)
+    {
+        onStopped = nullptr;
+    }
+
+    if (onCreated && onCreated->GetParentContext() == context)
+    {
+        onCreated = nullptr;
+    }
+
+    if (onDeleted && onDeleted->GetParentContext() == context)
+    {
+        onDeleted = nullptr;
+    }
+
+    if (onModified && onModified->GetParentContext() == context)
+    {
+        onModified = nullptr;
+    }
+
+    if (onRenamed && onRenamed->GetParentContext() == context)
+    {
+        onRenamed = nullptr;
+    }
+}
+
+void SMDirectoryWatcher::OnProcessEvent(const NotifyEvent &event)
+{
+    switch (event.type)
+    {
+    case kFilesystem:
+    {
+        if (event.flags & kCreated)
+        {
+            if (onCreated && onCreated->IsRunnable())
+            {
+                auto relPath = fs::path(event.path).lexically_relative(g_pSM->GetGamePath() / gamePath).string();
+
+                onCreated->PushCell(handle);
+                onCreated->PushString(relPath.c_str());
+                onCreated->Execute(nullptr);
+            }
+        }
+
+        if (event.flags & kDeleted)
+        {
+            if (onDeleted && onDeleted->IsRunnable())
+            {
+                auto relPath = fs::path(event.path).lexically_relative(g_pSM->GetGamePath() / gamePath).string();
+
+                onDeleted->PushCell(handle);
+                onDeleted->PushString(relPath.c_str());
+                onDeleted->Execute(nullptr);
+            }
+        }
+
+        if (event.flags & kModified)
+        {
+            if (onModified && onModified->IsRunnable())
+            {
+                auto relPath = fs::path(event.path).lexically_relative(g_pSM->GetGamePath() / gamePath).string();
+
+                onModified->PushCell(handle);
+                onModified->PushString(relPath.c_str());
+                onModified->Execute(nullptr);
+            }
+        }
+
+        if (event.flags & kRenamed)
+        {
+            if (onRenamed && onRenamed->IsRunnable())
+            {
+                auto relPath = fs::path(event.path).lexically_relative(g_pSM->GetGamePath() / gamePath).string();
+                auto relLastPath = fs::path(event.lastPath).lexically_relative(g_pSM->GetGamePath() / gamePath).string();
+
+                onRenamed->PushCell(handle);
+                onRenamed->PushString(relLastPath.c_str());
+                onRenamed->PushString(relPath.c_str());
+                onRenamed->Execute(nullptr);
+            }
+        }
+
+        break;
+    }
+    case kStart:
+    {
+        if (onStarted && onStarted->IsRunnable())
+        {
+            onStarted->PushCell(handle);
+            onStarted->Execute(nullptr);
+        }
+
+        break;
+    }
+    case kStop:
+    {
+        if (onStopped && onStopped->IsRunnable())
+        {
+            onStopped->PushCell(handle);
+            onStopped->Execute(nullptr);
+        }
+        break;
+    }
+    }
+}
+
+SMDirectoryWatcherManager g_FileSystemWatchers;
+SourceMod::HandleType_t SMDirectoryWatcherManager::m_HandleType(0);
+
+SMDirectoryWatcherManager::SMDirectoryWatcherManager() {}
 
 static void GameFrameHook(bool simulating)
 {
-	g_FileSystemWatchers.OnGameFrame(simulating);
+    g_FileSystemWatchers.OnGameFrame(simulating);
 }
 
-bool FileSystemWatcherManager::SDK_OnLoad(char* error, int errorSize)
+bool SMDirectoryWatcherManager::SDK_OnLoad(char *error, int errorSize)
 {
-	m_HandleType = g_pHandleSys->CreateType("FileSystemWatcher", this, 0, nullptr, nullptr, myself->GetIdentity(), nullptr);
-	if (!m_HandleType)
-	{
-		ke::SafeStrcpy(error, errorSize, "Failed to create FileSystemWatcher handle type.");
-		return false;
-	}
+    m_HandleType =
+        g_pHandleSys->CreateType("FileSystemWatcher", this, 0, nullptr, nullptr,
+                                 myself->GetIdentity(), nullptr);
+    if (!m_HandleType)
+    {
+        std::snprintf(error, errorSize,
+                      "Failed to create FileSystemWatcher handle type.");
+        return false;
+    }
 
-	plsys->AddPluginsListener(this);
+    plsys->AddPluginsListener(this);
 
-	smutils->AddGameFrameHook(&GameFrameHook);
+    smutils->AddGameFrameHook(&GameFrameHook);
 
-	sharesys->AddNatives(myself, m_Natives);
+    sharesys->AddNatives(myself, m_Natives);
 
-	return true;
+    return true;
 }
 
-void FileSystemWatcherManager::SDK_OnUnload()
+void SMDirectoryWatcherManager::SDK_OnUnload()
 {
-	smutils->RemoveGameFrameHook(&GameFrameHook);
+    smutils->RemoveGameFrameHook(&GameFrameHook);
 
-	plsys->RemovePluginsListener(this);
+    plsys->RemovePluginsListener(this);
 
-	if (m_HandleType)
-	{
-		g_pHandleSys->RemoveType(m_HandleType, myself->GetIdentity());
-	}
+    if (m_HandleType)
+    {
+        g_pHandleSys->RemoveType(m_HandleType, myself->GetIdentity());
+    }
 }
 
-void FileSystemWatcherManager::OnGameFrame(bool simulating)
+void SMDirectoryWatcherManager::OnGameFrame(bool simulating)
 {
-	for (auto it = m_watchers.begin(); it != m_watchers.end(); it++)
-	{
-		(*it)->OnGameFrame(simulating);
-	}
+    for (auto it = m_watchers.begin(); it != m_watchers.end(); it++)
+    {
+        (*it)->OnGameFrame(simulating);
+    }
 }
 
-SourceMod::Handle_t FileSystemWatcherManager::CreateWatcher(SourcePawn::IPluginContext* context, const std::string &path)
+SourceMod::Handle_t SMDirectoryWatcherManager::CreateWatcher(
+    SourcePawn::IPluginContext *context,
+    const fs::path &path)
 {
-	FileSystemWatcher* watcher = new FileSystemWatcher(path);
-	watcher->m_owningContext = context;
-	watcher->m_Handle = handlesys->CreateHandle(m_HandleType, watcher, context->GetIdentity(), myself->GetIdentity(), nullptr);
-	m_watchers.push_back(watcher);
-	return watcher->m_Handle;
+    SMDirectoryWatcher *watcher = new SMDirectoryWatcher(path);
+    watcher->owningContext = context;
+    watcher->handle =
+        handlesys->CreateHandle(m_HandleType, watcher, context->GetIdentity(),
+                                myself->GetIdentity(), nullptr);
+    m_watchers.push_back(watcher);
+    return watcher->handle;
 }
 
-FileSystemWatcher* FileSystemWatcherManager::GetWatcher(SourceMod::Handle_t handle)
+SMDirectoryWatcher *SMDirectoryWatcherManager::GetWatcher(
+    SourceMod::Handle_t handle)
 {
-	FileSystemWatcher* watcher = nullptr;
-	HandleSecurity sec(nullptr, myself->GetIdentity());
+    SMDirectoryWatcher *watcher = nullptr;
+    HandleSecurity sec(nullptr, myself->GetIdentity());
 
-	SourceMod::HandleError err = g_pHandleSys->ReadHandle(handle, m_HandleType, &sec, (void**)(&watcher));
-	return (err == HandleError_None) ? watcher : nullptr;
+    SourceMod::HandleError err =
+        g_pHandleSys->ReadHandle(handle, m_HandleType, &sec, (void **)(&watcher));
+    return (err == HandleError_None) ? watcher : nullptr;
 }
 
-void FileSystemWatcherManager::OnHandleDestroy(SourceMod::HandleType_t type, void *object)
+void SMDirectoryWatcherManager::OnHandleDestroy(SourceMod::HandleType_t type,
+                                                void *object)
 {
-	if (type == m_HandleType)
-	{
-		FileSystemWatcher* watcher = (FileSystemWatcher*)object;
+    if (type == m_HandleType)
+    {
+        SMDirectoryWatcher *watcher = (SMDirectoryWatcher *)object;
 
-		for (auto it = m_watchers.begin(); it != m_watchers.end();)
-		{
-			if (*it == watcher)
-			{
-				it = m_watchers.erase(it);
-			}
-			else
-			{
-				it++;
-			}
-		}
+        for (auto it = m_watchers.begin(); it != m_watchers.end();)
+        {
+            if (*it == watcher)
+            {
+                it = m_watchers.erase(it);
+            }
+            else
+            {
+                it++;
+            }
+        }
 
-		delete watcher;
-	}
+        delete watcher;
+    }
 }
 
-void FileSystemWatcherManager::OnPluginUnloaded(SourceMod::IPlugin* plugin)
+void SMDirectoryWatcherManager::OnPluginUnloaded(SourceMod::IPlugin *plugin)
 {
-	for (auto it = m_watchers.begin(); it != m_watchers.end(); it++)
-	{
-		(*it)->OnPluginUnloaded(plugin);
-	}
+    for (auto it = m_watchers.begin(); it != m_watchers.end(); it++)
+    {
+        (*it)->OnPluginUnloaded(plugin);
+    }
 }
 
-cell_t Native_FileSystemWatcher(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_FileSystemWatcher(SourcePawn::IPluginContext *context,
+                             const cell_t *params)
 {
-	char* _path = nullptr;
-	context->LocalToString(params[1], &_path);
+    char *_path = nullptr;
+    context->LocalToString(params[1], &_path);
 
-	std::string path(_path);
+    fs::path path = fs::path(_path).lexically_normal();
+    if (!path.empty() && *path.begin() == "..")
+    {
+        context->ReportError("Path \"%s\" is invalid: path must be within the game directory", path.string().c_str());
+        return 0;
+    }
 
-	return g_FileSystemWatchers.CreateWatcher(context, path);
+    return g_FileSystemWatchers.CreateWatcher(context, path);
 }
 
-cell_t Native_FileSystemWatcher_IncludeSubdirectoriesGet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_IncludeSubdirGet(SourcePawn::IPluginContext *context,
+                            const cell_t *params)
 {
-	FileSystemWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
-	if (!watcher)
-	{
-		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
-		return 0;
-	}
+    SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+    if (!watcher)
+    {
+        context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
+        return 0;
+    }
 
-	return watcher->m_includeSubdirectories;
+    return watcher->options.subtree;
 }
 
-cell_t Native_FileSystemWatcher_IncludeSubdirectoriesSet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_IncludeSubdirSet(SourcePawn::IPluginContext *context,
+                            const cell_t *params)
 {
-	FileSystemWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
-	if (!watcher)
-	{
-		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
-		return 0;
-	}
+    SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+    if (!watcher)
+    {
+        context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
+        return 0;
+    }
 
-	watcher->m_includeSubdirectories = params[2] != 0;
-	return 0;
+    watcher->options.subtree = params[2] != 0;
+    return 0;
 }
 
-cell_t Native_FileSystemWatcher_NotifyFilterGet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_WatchSymLinksGet(SourcePawn::IPluginContext *context,
+                            const cell_t *params)
 {
-	FileSystemWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
-	if (!watcher)
-	{
-		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
-		return 0;
-	}
+    SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+    if (!watcher)
+    {
+        context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
+        return 0;
+    }
 
-	return (cell_t)watcher->m_notifyFilter;
+    return watcher->options.symlinks;
 }
 
-cell_t Native_FileSystemWatcher_NotifyFilterSet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_WatchSymLinksSet(SourcePawn::IPluginContext *context,
+                            const cell_t *params)
 {
-	FileSystemWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
-	if (!watcher)
-	{
-		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
-		return 0;
-	}
+    SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+    if (!watcher)
+    {
+        context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
+        return 0;
+    }
 
-	watcher->m_notifyFilter = (FileSystemWatcher::NotifyFilters)params[2];
-	return 0;
+    watcher->options.symlinks = params[2] != 0;
+    return 0;
 }
 
-cell_t Native_FileSystemWatcher_RetryIntervalGet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_NotifyFilterGet(SourcePawn::IPluginContext *context,
+                           const cell_t *params)
 {
-	FileSystemWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
-	if (!watcher)
-	{
-		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
-		return 0;
-	}
+    SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+    if (!watcher)
+    {
+        context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
+        return 0;
+    }
 
-	return watcher->m_retryInterval;
+    return (cell_t)watcher->options.notifyFilterFlags;
 }
 
-cell_t Native_FileSystemWatcher_RetryIntervalSet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_NotifyFilterSet(SourcePawn::IPluginContext *context,
+                           const cell_t *params)
 {
-	FileSystemWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
-	if (!watcher)
-	{
-		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
-		return 0;
-	}
+    SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+    if (!watcher)
+    {
+        context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
+        return 0;
+    }
 
-	int retryInterval = params[2];
-	if (retryInterval < 0)
-	{
-		context->ReportError("RetryInterval cannot be negative");
-		return 0;
-	}
-
-	watcher->m_retryInterval = retryInterval;
-	return 0;
+    watcher->options.notifyFilterFlags =
+        (DirectoryWatcher::NotifyFilterFlags)params[2];
+    return 0;
 }
 
-cell_t Native_FileSystemWatcher_InternalBufferSizeGet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_RetryIntervalGet(SourcePawn::IPluginContext *context,
+                            const cell_t *params)
 {
-	FileSystemWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
-	if (!watcher)
-	{
-		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
-		return 0;
-	}
-
-	return (cell_t)watcher->m_bufferSize;
+    return 0;
 }
 
-cell_t Native_FileSystemWatcher_InternalBufferSizeSet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_RetryIntervalSet(SourcePawn::IPluginContext *context,
+                            const cell_t *params)
 {
-	FileSystemWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
-	if (!watcher)
-	{
-		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
-		return 0;
-	}
-
-	watcher->m_bufferSize = params[2];
-	return 0;
+    return 0;
 }
 
-cell_t Native_FileSystemWatcher_OnStartedSet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_InternalBufferSizeGet(SourcePawn::IPluginContext *context,
+                                 const cell_t *params)
 {
-	FileSystemWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
-	if (!watcher)
-	{
-		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
-		return 0;
-	}
+    SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+    if (!watcher)
+    {
+        context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
+        return 0;
+    }
 
-	SourcePawn::IPluginFunction* cb = context->GetFunctionById(params[2]);
-	if (!cb && params[2] != -1)
-	{
-		context->ReportError("Invalid function id %x", params[2]);
-		return 0;
-	}
-
-	watcher->m_onStarted = cb;
-	return 0;
+    return (cell_t)watcher->options.bufferSize;
 }
 
-cell_t Native_FileSystemWatcher_OnStoppedSet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_InternalBufferSizeSet(SourcePawn::IPluginContext *context,
+                                 const cell_t *params)
 {
-	FileSystemWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
-	if (!watcher)
-	{
-		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
-		return 0;
-	}
+    SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+    if (!watcher)
+    {
+        context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
+        return 0;
+    }
 
-	SourcePawn::IPluginFunction* cb = context->GetFunctionById(params[2]);
-	if (!cb && params[2] != -1)
-	{
-		context->ReportError("Invalid function id %x", params[2]);
-		return 0;
-	}
-
-	watcher->m_onStopped = cb;
-	return 0;
+    watcher->options.bufferSize = params[2];
+    return 0;
 }
 
-cell_t Native_FileSystemWatcher_OnCreatedSet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_OnStartedSet(SourcePawn::IPluginContext *context,
+                        const cell_t *params)
 {
-	FileSystemWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
-	if (!watcher)
-	{
-		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
-		return 0;
-	}
+    SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+    if (!watcher)
+    {
+        context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
+        return 0;
+    }
 
-	SourcePawn::IPluginFunction* cb = context->GetFunctionById(params[2]);
-	if (!cb && params[2] != -1)
-	{
-		context->ReportError("Invalid function id %x", params[2]);
-		return 0;
-	}
+    SourcePawn::IPluginFunction *cb = context->GetFunctionById(params[2]);
+    if (!cb && params[2] != -1)
+    {
+        context->ReportError("Invalid function id %x", params[2]);
+        return 0;
+    }
 
-	watcher->m_onCreated = cb;
-	return 0;
+    watcher->onStarted = cb;
+    return 0;
 }
 
-cell_t Native_FileSystemWatcher_OnDeletedSet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_OnStoppedSet(SourcePawn::IPluginContext *context,
+                        const cell_t *params)
 {
-	FileSystemWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
-	if (!watcher)
-	{
-		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
-		return 0;
-	}
+    SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+    if (!watcher)
+    {
+        context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
+        return 0;
+    }
 
-	SourcePawn::IPluginFunction* cb = context->GetFunctionById(params[2]);
-	if (!cb && params[2] != -1)
-	{
-		context->ReportError("Invalid function id %x", params[2]);
-		return 0;
-	}
+    SourcePawn::IPluginFunction *cb = context->GetFunctionById(params[2]);
+    if (!cb && params[2] != -1)
+    {
+        context->ReportError("Invalid function id %x", params[2]);
+        return 0;
+    }
 
-	watcher->m_onDeleted = cb;
-	return 0;
+    watcher->onStopped = cb;
+    return 0;
 }
 
-cell_t Native_FileSystemWatcher_OnModifiedSet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_OnCreatedSet(SourcePawn::IPluginContext *context,
+                        const cell_t *params)
 {
-	FileSystemWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
-	if (!watcher)
-	{
-		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
-		return 0;
-	}
+    SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+    if (!watcher)
+    {
+        context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
+        return 0;
+    }
 
-	SourcePawn::IPluginFunction* cb = context->GetFunctionById(params[2]);
-	if (!cb && params[2] != -1)
-	{
-		context->ReportError("Invalid function id %x", params[2]);
-		return 0;
-	}
+    SourcePawn::IPluginFunction *cb = context->GetFunctionById(params[2]);
+    if (!cb && params[2] != -1)
+    {
+        context->ReportError("Invalid function id %x", params[2]);
+        return 0;
+    }
 
-	watcher->m_onModified = cb;
-	return 0;
+    watcher->onCreated = cb;
+    return 0;
 }
 
-cell_t Native_FileSystemWatcher_OnRenamedSet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_OnDeletedSet(SourcePawn::IPluginContext *context,
+                        const cell_t *params)
 {
-	FileSystemWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
-	if (!watcher)
-	{
-		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
-		return 0;
-	}
+    SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+    if (!watcher)
+    {
+        context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
+        return 0;
+    }
 
-	SourcePawn::IPluginFunction* cb = context->GetFunctionById(params[2]);
-	if (!cb && params[2] != -1)
-	{
-		context->ReportError("Invalid function id %x", params[2]);
-		return 0;
-	}
+    SourcePawn::IPluginFunction *cb = context->GetFunctionById(params[2]);
+    if (!cb && params[2] != -1)
+    {
+        context->ReportError("Invalid function id %x", params[2]);
+        return 0;
+    }
 
-	watcher->m_onRenamed = cb;
-	return 0;
+    watcher->onDeleted = cb;
+    return 0;
 }
 
-cell_t Native_FileSystemWatcher_IsWatchingGet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_OnModifiedSet(SourcePawn::IPluginContext *context,
+                         const cell_t *params)
 {
-	FileSystemWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
-	if (!watcher)
-	{
-		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
-		return 0;
-	}
+    SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+    if (!watcher)
+    {
+        context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
+        return 0;
+    }
 
-	return watcher->IsWatching();
+    SourcePawn::IPluginFunction *cb = context->GetFunctionById(params[2]);
+    if (!cb && params[2] != -1)
+    {
+        context->ReportError("Invalid function id %x", params[2]);
+        return 0;
+    }
+
+    watcher->onModified = cb;
+    return 0;
 }
 
-cell_t Native_FileSystemWatcher_IsWatchingSet(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_OnRenamedSet(SourcePawn::IPluginContext *context,
+                        const cell_t *params)
 {
-	FileSystemWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
-	if (!watcher)
-	{
-		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
-		return 0;
-	}
+    SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+    if (!watcher)
+    {
+        context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
+        return 0;
+    }
 
-	bool state = params[2] != 0;
+    SourcePawn::IPluginFunction *cb = context->GetFunctionById(params[2]);
+    if (!cb && params[2] != -1)
+    {
+        context->ReportError("Invalid function id %x", params[2]);
+        return 0;
+    }
 
-	if (state)
-	{
-		watcher->Start();
-	}
-	else
-	{
-		watcher->Stop();
-	}
-
-	return 0;
+    watcher->onRenamed = cb;
+    return 0;
 }
 
-cell_t Native_FileSystemWatcher_GetPath(SourcePawn::IPluginContext *context, const cell_t *params)
+cell_t smn_IsWatchingGet(SourcePawn::IPluginContext *context,
+                         const cell_t *params)
 {
-	FileSystemWatcher* watcher = g_FileSystemWatchers.GetWatcher(params[1]);
-	if (!watcher)
-	{
-		context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
-		return 0;
-	}
+    SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+    if (!watcher)
+    {
+        context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
+        return 0;
+    }
 
-	char* buffer = nullptr;
-	context->LocalToString(params[2], &buffer);
-
-	int bufferSize = params[3];
-
-	return watcher->GetRelativePath(buffer, bufferSize);
+    return watcher->IsWatching();
 }
 
-sp_nativeinfo_s FileSystemWatcherManager::m_Natives[] =
+cell_t smn_IsWatchingSet(SourcePawn::IPluginContext *context,
+                         const cell_t *params)
 {
-	{"FileSystemWatcher.FileSystemWatcher",	Native_FileSystemWatcher},
-	{"FileSystemWatcher.IsWatching.get", Native_FileSystemWatcher_IsWatchingGet},
-	{"FileSystemWatcher.IsWatching.set", Native_FileSystemWatcher_IsWatchingSet},
-	{"FileSystemWatcher.IncludeSubdirectories.get", Native_FileSystemWatcher_IncludeSubdirectoriesGet},
-	{"FileSystemWatcher.IncludeSubdirectories.set", Native_FileSystemWatcher_IncludeSubdirectoriesSet},
-	{"FileSystemWatcher.NotifyFilter.get", Native_FileSystemWatcher_NotifyFilterGet},
-	{"FileSystemWatcher.NotifyFilter.set", Native_FileSystemWatcher_NotifyFilterSet},
-	{"FileSystemWatcher.RetryInterval.get", Native_FileSystemWatcher_RetryIntervalGet},
-	{"FileSystemWatcher.RetryInterval.set", Native_FileSystemWatcher_RetryIntervalSet},
-	{"FileSystemWatcher.InternalBufferSize.get", Native_FileSystemWatcher_InternalBufferSizeGet},
-	{"FileSystemWatcher.InternalBufferSize.set", Native_FileSystemWatcher_InternalBufferSizeSet},
-	{"FileSystemWatcher.OnStarted.set", Native_FileSystemWatcher_OnStartedSet},
-	{"FileSystemWatcher.OnStopped.set", Native_FileSystemWatcher_OnStoppedSet},
-	{"FileSystemWatcher.OnCreated.set", Native_FileSystemWatcher_OnCreatedSet},
-	{"FileSystemWatcher.OnDeleted.set", Native_FileSystemWatcher_OnDeletedSet},
-	{"FileSystemWatcher.OnModified.set", Native_FileSystemWatcher_OnModifiedSet},
-	{"FileSystemWatcher.OnRenamed.set", Native_FileSystemWatcher_OnRenamedSet},
-	{"FileSystemWatcher.GetPath", Native_FileSystemWatcher_GetPath},
-	{NULL,			NULL},
+    SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+    if (!watcher)
+    {
+        context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
+        return 0;
+    }
+
+    bool state = params[2] != 0;
+
+    if (state)
+    {
+        watcher->Start();
+    }
+    else
+    {
+        watcher->Stop();
+    }
+
+    return 0;
+}
+
+cell_t smn_GetPath(SourcePawn::IPluginContext *context, const cell_t *params)
+{
+    SMDirectoryWatcher *watcher = g_FileSystemWatchers.GetWatcher(params[1]);
+    if (!watcher)
+    {
+        context->ReportError("Invalid FileSystemWatcher handle %x", params[1]);
+        return 0;
+    }
+
+    size_t writtenBytes;
+    context->StringToLocalUTF8(params[2], params[3], watcher->gamePath.string().c_str(), &writtenBytes);
+    return writtenBytes;
+}
+
+sp_nativeinfo_s SMDirectoryWatcherManager::m_Natives[] = {
+    {"FileSystemWatcher.FileSystemWatcher", smn_FileSystemWatcher},
+    {"FileSystemWatcher.IsWatching.get", smn_IsWatchingGet},
+    {"FileSystemWatcher.IsWatching.set", smn_IsWatchingSet},
+    {"FileSystemWatcher.IncludeSubdirectories.get", smn_IncludeSubdirGet},
+    {"FileSystemWatcher.IncludeSubdirectories.set", smn_IncludeSubdirSet},
+    {"FileSystemWatcher.WatchDirectoryLinks.get", smn_WatchSymLinksGet},
+    {"FileSystemWatcher.WatchDirectoryLinks.set", smn_WatchSymLinksSet},
+    {"FileSystemWatcher.NotifyFilter.get", smn_NotifyFilterGet},
+    {"FileSystemWatcher.NotifyFilter.set", smn_NotifyFilterSet},
+    {"FileSystemWatcher.RetryInterval.get", smn_RetryIntervalGet},
+    {"FileSystemWatcher.RetryInterval.set", smn_RetryIntervalSet},
+    {"FileSystemWatcher.InternalBufferSize.get", smn_InternalBufferSizeGet},
+    {"FileSystemWatcher.InternalBufferSize.set", smn_InternalBufferSizeSet},
+    {"FileSystemWatcher.OnStarted.set", smn_OnStartedSet},
+    {"FileSystemWatcher.OnStopped.set", smn_OnStoppedSet},
+    {"FileSystemWatcher.OnCreated.set", smn_OnCreatedSet},
+    {"FileSystemWatcher.OnDeleted.set", smn_OnDeletedSet},
+    {"FileSystemWatcher.OnModified.set", smn_OnModifiedSet},
+    {"FileSystemWatcher.OnRenamed.set", smn_OnRenamedSet},
+    {"FileSystemWatcher.GetPath", smn_GetPath},
+    {NULL, NULL},
 };
