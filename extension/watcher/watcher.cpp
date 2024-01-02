@@ -169,7 +169,7 @@ int DirectoryWatcher::Worker::AddDirectory(const std::filesystem::path &path)
 
         if (options.subtree)
         {
-            for (const auto &entry : fs::directory_iterator(path))
+            for (const auto &entry : fs::directory_iterator(path, fs::directory_options::skip_permission_denied))
             {
                 if (entry.is_directory())
                 {
@@ -267,12 +267,17 @@ void DirectoryWatcher::Worker::ThreadProc()
                         {
                             fs::path watchPath(it->second);
 
-                            for (auto jt = watchDescriptors.begin(); jt != watchDescriptors.end(); jt++)
+                            for (auto jt = watchDescriptors.begin(); jt != watchDescriptors.end();)
                             {
                                 if (jt->first == event->wd || IsSubPath(watchPath, jt->second))
                                 {
                                     inotify_rm_watch(fileDescriptor, jt->first);
                                     jt = watchDescriptors.erase(jt);
+                                }
+
+                                if (jt != watchDescriptors.end())
+                                {
+                                    jt++;
                                 }
                             }
                         }

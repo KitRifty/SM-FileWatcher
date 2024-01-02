@@ -28,4 +28,50 @@
  */
 
 #include <gtest/gtest.h>
+#include <fstream>
 #include "runner.h"
+
+namespace fs = std::filesystem;
+
+TEST(SymbolicLinks, CreateRenameDeleteDir)
+{
+    WatchEventCollector watcher;
+    TempDir dir;
+    TempDir symDir;
+
+    EXPECT_TRUE(watcher.Watch(dir.GetPath(), {true, true, DirectoryWatcher::NotifyFilterFlags::kNotifyAll, 8192}));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    fs::create_directory_symlink(symDir.GetPath(), dir.GetPath() / "sym_link");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    auto file = std::ofstream(symDir.GetPath() / "existing_file");
+    file << "Hello world";
+    file.close();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    watcher.StopWatching();
+    watcher.ProcessEvents();
+
+    ASSERT_EQ(watcher.events.size(), 5);
+    ASSERT_EQ(watcher.events[0].type, DirectoryWatcher::NotifyEventType::kStart);
+    ASSERT_EQ(watcher.events[0].path, dir.GetPath());
+
+    ASSERT_EQ(watcher.events[1].type, DirectoryWatcher::NotifyEventType::kFilesystem);
+    ASSERT_EQ(watcher.events[1].flags, DirectoryWatcher::NotifyFilterFlags::kCreated);
+    ASSERT_EQ(watcher.events[1].path, dir.GetPath() / "sym_link");
+
+    ASSERT_EQ(watcher.events[2].type, DirectoryWatcher::NotifyEventType::kFilesystem);
+    ASSERT_EQ(watcher.events[2].flags, DirectoryWatcher::NotifyFilterFlags::kCreated);
+    ASSERT_EQ(watcher.events[2].path, dir.GetPath() / "sym_link" / "existing_file");
+
+    ASSERT_EQ(watcher.events[3].type, DirectoryWatcher::NotifyEventType::kFilesystem);
+    ASSERT_EQ(watcher.events[3].flags, DirectoryWatcher::NotifyFilterFlags::kModified);
+    ASSERT_EQ(watcher.events[3].path, dir.GetPath() / "sym_link" / "existing_file");
+
+    ASSERT_EQ(watcher.events[4].type, DirectoryWatcher::NotifyEventType::kStop);
+    ASSERT_EQ(watcher.events[4].path, dir.GetPath());
+}

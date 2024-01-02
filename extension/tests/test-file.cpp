@@ -44,7 +44,7 @@ TEST(File, CreateUpdateDeleteFile)
     options.bufferSize = 8192;
     options.notifyFilterFlags = DirectoryWatcher::NotifyFilterFlags::kNotifyAll;
 
-    EXPECT_TRUE(watcher.Watch(dir.GetPath(), options));
+    EXPECT_TRUE(watcher.Watch(dir.GetPath(), {false, false, DirectoryWatcher::NotifyFilterFlags::kNotifyAll, 8192}));
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
@@ -83,17 +83,11 @@ TEST(File, RenameFile)
     WatchEventCollector watcher;
     TempDir dir;
 
-    DirectoryWatcher::WatchOptions options;
-    options.subtree = false;
-    options.symlinks = false;
-    options.bufferSize = 8192;
-    options.notifyFilterFlags = DirectoryWatcher::NotifyFilterFlags::kNotifyAll;
-
     auto file = std::ofstream(dir.GetPath() / "new_file");
     file << "Hello world";
     file.close();
 
-    EXPECT_TRUE(watcher.Watch(dir.GetPath(), options));
+    EXPECT_TRUE(watcher.Watch(dir.GetPath(), {false, false, DirectoryWatcher::NotifyFilterFlags::kNotifyAll, 8192}));
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     fs::rename(dir.GetPath() / "new_file", dir.GetPath() / "my_new_file");
@@ -114,4 +108,41 @@ TEST(File, RenameFile)
 
     ASSERT_EQ(watcher.events[2].type, DirectoryWatcher::NotifyEventType::kStop);
     ASSERT_EQ(watcher.events[2].path, dir.GetPath());
+}
+
+TEST(File, MoveFileInAndOut)
+{
+    WatchEventCollector watcher;
+    TempDir dir;
+    TempDir otherDir;
+
+    auto file = std::ofstream(otherDir.GetPath() / "existing_file");
+    file << "Hello world";
+    file.close();
+
+    EXPECT_TRUE(watcher.Watch(dir.GetPath(), {false, false, DirectoryWatcher::NotifyFilterFlags::kNotifyAll, 8192}));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    fs::rename(otherDir.GetPath() / "existing_file", dir.GetPath() / "existing_file");
+    fs::rename(dir.GetPath() / "existing_file", otherDir.GetPath() / "existing_file");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    watcher.StopWatching();
+    watcher.ProcessEvents();
+
+    ASSERT_EQ(watcher.events.size(), 4);
+    ASSERT_EQ(watcher.events[0].type, DirectoryWatcher::NotifyEventType::kStart);
+    ASSERT_EQ(watcher.events[0].path, dir.GetPath());
+
+    ASSERT_EQ(watcher.events[1].type, DirectoryWatcher::NotifyEventType::kFilesystem);
+    ASSERT_EQ(watcher.events[1].flags, DirectoryWatcher::NotifyFilterFlags::kCreated);
+    ASSERT_EQ(watcher.events[1].path, dir.GetPath() / "existing_file");
+
+    ASSERT_EQ(watcher.events[2].type, DirectoryWatcher::NotifyEventType::kFilesystem);
+    ASSERT_EQ(watcher.events[2].flags, DirectoryWatcher::NotifyFilterFlags::kDeleted);
+    ASSERT_EQ(watcher.events[2].path, dir.GetPath() / "existing_file");
+
+    ASSERT_EQ(watcher.events[3].type, DirectoryWatcher::NotifyEventType::kStop);
+    ASSERT_EQ(watcher.events[3].path, dir.GetPath());
 }

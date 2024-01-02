@@ -33,41 +33,50 @@
 
 namespace fs = std::filesystem;
 
-TEST(Directory, CreateRenameDeleteDir)
+TEST(SubDirectory, CreateRenameDeleteDir)
 {
     WatchEventCollector watcher;
     TempDir dir;
 
-    EXPECT_TRUE(watcher.Watch(dir.GetPath(), {false, false, DirectoryWatcher::NotifyFilterFlags::kNotifyAll, 8192}));
+    EXPECT_TRUE(watcher.Watch(dir.GetPath(), {true, false, DirectoryWatcher::NotifyFilterFlags::kNotifyAll, 8192}));
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    fs::create_directory(dir.GetPath() / "new_dir");
-    fs::rename(dir.GetPath() / "new_dir", dir.GetPath() / "my_new_dir");
-    fs::remove(dir.GetPath() / "my_new_dir");
+    auto deepPath = dir.GetPath() / "deep" / "new_dir";
+
+    fs::create_directories(dir.GetPath() / "deep" / "new_dir");
+    fs::rename(dir.GetPath() / "deep" / "new_dir", dir.GetPath() / "deep" / "my_new_dir");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    fs::remove(dir.GetPath() / "deep" / "my_new_dir");
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     watcher.StopWatching();
     watcher.ProcessEvents();
 
-    ASSERT_EQ(watcher.events.size(), 5);
+    ASSERT_EQ(watcher.events.size(), 6);
     ASSERT_EQ(watcher.events[0].type, DirectoryWatcher::NotifyEventType::kStart);
     ASSERT_EQ(watcher.events[0].path, dir.GetPath());
 
     ASSERT_EQ(watcher.events[1].type, DirectoryWatcher::NotifyEventType::kFilesystem);
     ASSERT_EQ(watcher.events[1].flags, DirectoryWatcher::NotifyFilterFlags::kCreated);
-    ASSERT_EQ(watcher.events[1].path, dir.GetPath() / "new_dir");
+    ASSERT_EQ(watcher.events[1].path, dir.GetPath() / "deep");
 
     ASSERT_EQ(watcher.events[2].type, DirectoryWatcher::NotifyEventType::kFilesystem);
-    ASSERT_EQ(watcher.events[2].flags, DirectoryWatcher::NotifyFilterFlags::kRenamed);
-    ASSERT_EQ(watcher.events[2].lastPath, dir.GetPath() / "new_dir");
-    ASSERT_EQ(watcher.events[2].path, dir.GetPath() / "my_new_dir");
+    ASSERT_EQ(watcher.events[2].flags, DirectoryWatcher::NotifyFilterFlags::kCreated);
+    ASSERT_EQ(watcher.events[2].path, dir.GetPath() / "deep" / "new_dir");
 
     ASSERT_EQ(watcher.events[3].type, DirectoryWatcher::NotifyEventType::kFilesystem);
-    ASSERT_EQ(watcher.events[3].flags, DirectoryWatcher::NotifyFilterFlags::kDeleted);
-    ASSERT_EQ(watcher.events[3].path, dir.GetPath() / "my_new_dir");
+    ASSERT_EQ(watcher.events[3].flags, DirectoryWatcher::NotifyFilterFlags::kRenamed);
+    ASSERT_EQ(watcher.events[3].lastPath, dir.GetPath() / "deep" / "new_dir");
+    ASSERT_EQ(watcher.events[3].path, dir.GetPath() / "deep" / "my_new_dir");
 
-    ASSERT_EQ(watcher.events[4].type, DirectoryWatcher::NotifyEventType::kStop);
-    ASSERT_EQ(watcher.events[4].path, dir.GetPath());
+    ASSERT_EQ(watcher.events[4].type, DirectoryWatcher::NotifyEventType::kFilesystem);
+    ASSERT_EQ(watcher.events[4].flags, DirectoryWatcher::NotifyFilterFlags::kDeleted);
+    ASSERT_EQ(watcher.events[4].path, dir.GetPath() / "deep" / "my_new_dir");
+
+    ASSERT_EQ(watcher.events[5].type, DirectoryWatcher::NotifyEventType::kStop);
+    ASSERT_EQ(watcher.events[5].path, dir.GetPath());
 }

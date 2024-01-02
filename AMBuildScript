@@ -188,6 +188,9 @@ class ExtensionConfig(object):
             '-fvisibility-inlines-hidden',
             '-std=c++17'
         ]
+        
+        if builder.options.debug == '1':
+            cxx.cflags += ['-D_GLIBCXX_DEBUG']
 
         have_gcc = cxx.family == 'gcc'
         have_clang = cxx.family == 'clang'
